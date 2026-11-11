@@ -1,0 +1,26 @@
+# Personal connection and login state
+config.json
+*.connection.json
+!examples/*.connection.json
+known_hosts
+hosts-*
+.fo-watch.json
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+.env
+.env.*
+profile/
+profiles/
+state/
+sessions/
+credentials/
+member-bundles/
+# Local records and generated downloads
+VALIDATION.md
+.scratch/
+dist/
+node_modules/
+*.log
+.DS_Store

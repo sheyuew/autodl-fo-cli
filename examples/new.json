@@ -1,0 +1,13 @@
+{
+  "mode": "new",
+  "name": "训练任务",
+  "regions": ["替换为地区ID"],
+  "gpus": ["vGPU-32GB"],
+  "gpuCount": 1,
+  "minMemoryGb": 30,
+  "minExpandGb": 0,
+  "expandGb": 0,
+  "driver": {"mode": "any", "value": ""},
+  "imageType": "private",
+  "image": "替换为私有镜像UUID"
+}

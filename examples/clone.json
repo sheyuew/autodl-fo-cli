@@ -1,0 +1,10 @@
+{
+  "mode": "clone",
+  "instances": ["替换为源实例UUID"],
+  "gpus": ["vGPU-32GB"],
+  "gpuCount": 4,
+  "minMemoryGb": 30,
+  "minExpandGb": 0,
+  "expandGb": 0,
+  "driver": {"mode": "any", "value": ""}
+}
