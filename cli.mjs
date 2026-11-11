@@ -120,7 +120,11 @@ async function main(){
   if(cmd==='setup'){await setup(arg,key);return;}
   if(cmd==='notify-test'){await desktopNotification('AutoDL 提醒测试','这是一条本地测试消息，不代表抢卡成功。');console.log('已发送桌面提醒，请检查系统通知权限。');return;}
   if(!config){if(cmd)throw new Error('尚未配置连接。请先运行 fo keygen，再导入管理员给的连接文件：fo setup 文件路径');await setup(undefined,key);return;}
-  if(!cmd){const [action]=await select('AutoDL 远程抢卡',[{id:'wizard',name:'创建抢卡任务'},{id:'status',name:'查看任务状态'},{id:'login',name:'首次登录/重新登录 AutoDL'},{id:'watch',name:'等待完成提醒'},{id:'browser',name:'查看远程浏览器'},{id:'doctor',name:'检查连接'},{id:'notifications',name:'查看历史通知'},{id:'setup',name:'导入新的连接文件'}],x=>x.name);cmd=action.id;}
+  if(!cmd){
+    const [action]=await select('AutoDL 远程抢卡',[{id:'wizard',name:'创建抢卡任务'},{id:'status',name:'查看任务状态'},{id:'login',name:'首次登录/重新登录 AutoDL'},{id:'watch',name:'等待完成提醒'},{id:'browser',name:'查看远程浏览器'},{id:'doctor',name:'检查连接'},{id:'notifications',name:'查看历史通知'},{id:'setup',name:'导入新的连接文件'}],x=>x.name);cmd=action.id;
+    // Let long-running actions receive OS signals; prompting actions reopen it.
+    rl.close();rl=null;
+  }
   if(cmd==='setup'){await setup();return;}
   if(cmd==='wizard')await wizard();
   else if(cmd==='status'||cmd==='doctor')console.log(JSON.stringify(await rpc({op:cmd}),null,2));

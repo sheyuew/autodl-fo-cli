@@ -8,7 +8,7 @@
 
 ## 1. 下载并启动
 
-从仓库 Releases 下载 `autodl-fo-cli-v0.1.0.zip` 并解压。终端进入解压后的 `autodl-fo-cli` 文件夹：
+从仓库 Releases 下载最新版本的 `autodl-fo-cli-v版本号.zip` 并解压。终端进入解压后的 `autodl-fo-cli` 文件夹：
 
 ```bash
 bash ./fo

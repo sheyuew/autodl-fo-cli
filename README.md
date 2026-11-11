@@ -80,7 +80,10 @@ Fo 原始脚本不随本仓库或客户端 ZIP 分发，管理员需从上游单
 
 ```bash
 npm test
+npm run test:terminal
 ```
+
+终端回归测试和客户端 ZIP 打包另需 Python 3；成员运行客户端无需 Python。终端测试使用本地模拟连接，验证菜单和 Ctrl+C 的实际交互。
 
 浏览器集成测试另需 Chrome 和从上游取得的原始 Fo 源码：
 
