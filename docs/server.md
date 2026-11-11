@@ -29,6 +29,20 @@ bash install-multi.sh
 
 ## 成员开通流程
 
+推荐直接生成邀请码：
+
+```bash
+fo-admin invite-code alice server.example.com
+```
+
+将服务器 IP/域名替换为实际值，把输出的 `FO1-` 完整邀请码私下发给 Alice。她只需 `bash ./fo join` 粘贴，然后在终端输入自己的 AutoDL 账号密码。无需收集公钥、发送 JSON 或手动指定私钥。
+
+邀请码默认 24 小时有效，首次兑换才创建独立环境并绑定成员本机公钥；同一公钥可恢复中断的兑换，其他公钥拒绝。每个 AutoDL 账号使用一个新代号和邀请码。重复生成尚未兑换的同代号邀请码会撤销旧的未绑定码。终端会同时显示 `fo-admin revoke-code 邀请ID`，可提前撤销。
+
+`fo-enroll.service` 以 root 管理本机 Unix socket；专用 SSH 身份 `fo-enroll` 只允许使用临时密钥执行指定邀请码的兑换，不提供 shell、终端、端口转发或其他账号访问。邀请码包含该受限临时凭证，请按密码保管。服务只借用既有 SSH 端口，不新增公网监听。真实成员密钥在成员电脑生成，服务器只接收公钥。
+
+已有手工公钥方式仍可继续：
+
 1. 请成员从 GitHub 下载客户端并运行 `bash ./fo keygen`，把公钥和英文代号发来。管理员不需要成员私钥或 AutoDL 密码。
 2. 把公钥保存为服务器上的 `/path/to/alice.pub`，然后执行：
 
@@ -48,6 +62,8 @@ fo-admin invite alice server.example.com
 
 ```bash
 fo-admin list
+fo-admin invite-code 新代号 server.example.com
+fo-admin revoke-code 邀请ID
 fo-admin key alice /path/to/new.pub
 fo-admin invite alice server.example.com
 fo-admin disable alice
@@ -60,6 +76,7 @@ fo-admin disable alice
 ## 服务与存储
 
 - 成员：`fo-user@alice.target`，浏览器 `fo-browser@alice.service`。
+- 邀请兑换：`fo-enroll.service`，私有 socket `/run/fo-enroll/enroll.sock`，邀请元数据 `/var/lib/fo-enrollment`（0700）。
 - 所有者原环境：`fo-autodl.target`、`fo-browser.service`。
 - 成员资料：`/var/lib/fo-tenants/alice`，目录 0700，控制 socket/任务文件 0600。
 - 元数据与受限 SSH 配置由 root 管理，成员不能通过 RPC 指定其他账号或 socket。
@@ -74,5 +91,7 @@ fo-admin disable alice
 ## 凭据与发布
 
 GitHub 仅分发代码，连接文件私下发送。仓库不应上传 `config.json`、私钥、AutoDL 会话、浏览器资料或个人部署记录。成员无法获得其他成员账号权限，但服务器管理员可管理这些环境。
+
+升级至支持终端登录的服务器代码后，已有浏览器进程需要在合适时机重启对应服务才能加载新操作；安装多账号模板本身不重启已有浏览器。客户端 `fo login-browser` 保留浏览器登录方式。
 
 平台接口或登录失效时需要重新适配/登录；自研为纯 HTTP 的任务引擎不在当前版本内。真实租用由最终确认的约束决定，发布或安装客户端本身不创建付费任务。

@@ -3,7 +3,8 @@ import {execFileSync} from 'node:child_process';
 import {mkdir,readFile,writeFile,readdir,access,chmod,cp,rm} from 'node:fs/promises';
 import {join,dirname} from 'node:path';import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';import {tenantRuntime} from './lib/tenant.mjs';
-import {memberFiles,cleanPublicKey,memberInvitation} from './lib/provision.mjs';import {writeJSON} from './lib/storage.mjs';
+import {EnrollmentStore,decodeInvite} from './lib/enrollment.mjs';
+import {memberFiles,cleanPublicKey,memberInvitation,writePublicFile} from './lib/provision.mjs';import {writeJSON} from './lib/storage.mjs';
 const base=dirname(fileURLToPath(import.meta.url)),etc='/etc/fo-autodl';
 const run=(file,args,options={})=>execFileSync(file,args,{encoding:'utf8',stdio:'pipe',...options});
 function serviceState(unit){try{return run('systemctl',['is-active',unit]).trim();}catch(e){if(e.status===3)return String(e.stdout).trim()||'inactive';throw e;}}
@@ -16,10 +17,10 @@ async function writeConfig(c){
   const t=tenantRuntime(c),files=memberFiles(c,c.publicKey);
   await writeJSON(configPath(c.id),c);await chmod(configPath(c.id),0o644);
   await writeJSON(etc+'/users/'+t.user+'.json',{id:c.id,slot:c.slot});await chmod(etc+'/users/'+t.user+'.json',0o644);
-  await writeFile(etc+'/env/'+c.id,Object.entries({...files.env,FO_DISPLAY:t.display,FO_STATE:t.state,FO_WEB_PORT:t.webPort,FO_VNC_PORT:t.vncPort}).map(([k,v])=>`${k}=${v}`).join('\n')+'\n',{mode:0o644});
-  await writeFile(etc+'/keys/'+t.user,files.key,{mode:0o644});
+  await writePublicFile(etc+'/env/'+c.id,Object.entries({...files.env,FO_DISPLAY:t.display,FO_STATE:t.state,FO_WEB_PORT:t.webPort,FO_VNC_PORT:t.vncPort}).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+  await writePublicFile(etc+'/keys/'+t.user,files.key);
   const sshPath='/etc/ssh/sshd_config.d/70-fo-'+c.id+'.conf';
-  await writeFile(sshPath,files.ssh,{mode:0o644});
+  await writePublicFile(sshPath,files.ssh);
   try{run('/usr/sbin/sshd',['-t']);}catch(e){await rm(sshPath);throw e;}
   run('systemctl',['reload','ssh']);
 }
@@ -78,8 +79,17 @@ try{
   else if(cmd==='key'){const c=await config(id);c.publicKey=await keyFile(arg);await writeConfig(c);console.log('公钥已更新');}
   else if(cmd==='bundle')await bundle(id,arg);
   else if(cmd==='invite')await invitation(id,arg);
+  else if(cmd==='invite-code'){
+    tenantRuntime({id,slot:1});if(await exists(configPath(id)))throw new Error('该代号已存在，请为另一个 AutoDL 账号使用新代号');
+    const hostKey=await readFile('/etc/ssh/ssh_host_ed25519_key.pub','utf8');
+    const store=new EnrollmentStore('/var/lib/fo-enrollment',{authorizedKeys:etc+'/enrollment_keys'});
+    const code=await store.issue({tenant:id,host:arg,serverHostKey:hostKey});
+    console.log('将以下完整邀请码私下发给该成员；24 小时有效，只能绑定一台电脑。');console.log(code);
+    console.log('撤销命令：fo-admin revoke-code '+decodeInvite(code).id);
+  }
+  else if(cmd==='revoke-code')await new EnrollmentStore('/var/lib/fo-enrollment',{authorizedKeys:etc+'/enrollment_keys'}).revoke(id);
   else if(cmd==='list'){for(const name of await list()){const t=tenantRuntime(await config(name));console.log(JSON.stringify({id:name,user:t.user,webPort:t.webPort,active:serviceState('fo-user@'+name+'.target')}));}}
   else if(cmd==='disable'){const c=await config(id);await rm(etc+'/keys/'+tenantRuntime(c).user,{force:true});run('systemctl',['disable','--now','fo-user@'+id+'.target']);console.log('已撤销 SSH 并停止该环境，账号资料保留。');}
-  else console.log('fo-admin add 代号 公钥文件\nfo-admin invite 代号 服务器地址\nfo-admin key 代号 新公钥文件\nfo-admin bundle 代号 服务器地址\nfo-admin list\nfo-admin disable 代号');
+  else console.log('fo-admin invite-code 新代号 服务器地址\nfo-admin revoke-code 邀请ID\nfo-admin add 代号 公钥文件\nfo-admin invite 代号 服务器地址\nfo-admin key 代号 新公钥文件\nfo-admin bundle 代号 服务器地址\nfo-admin list\nfo-admin disable 代号');
 }catch(e){console.error(e.stderr?.toString().trim()||e.message);process.exitCode=1;}
 finally{if(locked)await rm('/run/fo-multi-admin.lock',{recursive:true,force:true});}

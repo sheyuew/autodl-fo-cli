@@ -5,6 +5,7 @@ import {closeBrowser} from './lib/shutdown.mjs';
 import {tenantRuntime,AccountBinding} from './lib/tenant.mjs';import {Notifications} from './lib/notifications.mjs';
 import {WorkQueue} from './lib/queue.mjs';
 import {FoRuntime,RUNNER_URL} from './lib/runtime.mjs';
+import {submitLogin} from './lib/login.mjs';import {readJSON,writeJSON} from './lib/storage.mjs';
 process.umask(0o077);
 const tenant=tenantRuntime(process.env.FO_TENANT_CONFIG?JSON.parse(await readFile(process.env.FO_TENANT_CONFIG,'utf8')):null);
 const {state,socket}=tenant,binding=new AccountBinding(state),notifications=new Notifications(state,tenant.id);
@@ -39,13 +40,36 @@ async function dispatch(q){
   if(!q||typeof q!=='object'||'tenant' in q||'socket' in q||'account' in q)throw new Error('不能通过请求切换账号');
   if(q.op==='notifications')return notifications.list(q.after??0);
   if(q.op==='viewer')return {port:tenant.webPort,password:(await readFile(state+'/vnc-secret','utf8')).trim(),tenant:tenant.id};
+  if(q.op==='login-password'){
+    const username=q.username?.trim(),password=q.password;
+    if(typeof username!=='string'||!username||username.length>200||typeof password!=='string'||!password||password.length>512)throw new Error('请输入有效的 AutoDL 账号和密码');
+    const bound=await readJSON(state+'/account-binding.json',null),saved=await readJSON(state+'/login-identity.json',null);
+    if(bound&&saved&&saved.username!==username)throw new Error('该环境已绑定另一个 AutoDL 账号，请切换已保存账号或用新邀请码添加账号');
+    const d=await driver({activate:false}),health=await d.diagnose();
+    if(bound&&!saved){
+      const user=await cdp.evaluate(session,"JSON.parse(localStorage.getItem('user')||'{}')");
+      if(![user.sub_name,user.username,user.user_name,user.phone].includes(username))throw new Error('该环境已有绑定账号，请使用原登录名；其他账号需新邀请码');
+    }
+    if(health.authenticated&&bound&&(!saved||saved.username===username)){await binding.check(health);await writeJSON(state+'/login-identity.json',{username});if(runtime&&!health.fo)await runtime.activate(session);interactive=false;return {state:'authenticated',account:health.account};}
+    interactive=true;
+    await cdp.call('Page.navigate',{url:username.includes('@')?'https://www.autodl.com/subAccountLogin':'https://www.autodl.com/login'},session);
+    let result;try{result=await submitLogin(cdp,session,{username,password});}catch{throw new Error('自动登录未完成，请检查网络或使用 fo login-browser');}finally{q.password=undefined;}
+    if(result.state==='authenticated'){
+      await binding.check(await d.diagnose());await writeJSON(state+'/login-identity.json',{username});
+      if(runtime)await runtime.activate(session);interactive=false;
+    }
+    return result;
+  }
   if(q.op==='login'){
     await driver({activate:false});interactive=true;
     await cdp.call('Page.navigate',{url:'https://www.autodl.com/console/instance/list'},session);
     return dispatch({op:'viewer'});
   }
   if(q.op==='activate'){
-    const d=await driver({activate:false});await binding.check(await d.diagnose());
+    const d=await driver({activate:false});
+    if(q.username){const user=await cdp.evaluate(session,"JSON.parse(localStorage.getItem('user')||'{}')");if(![user.sub_name,user.username,user.user_name,user.phone].includes(q.username))throw new Error('浏览器登录账号与终端输入不符，请核对后重试');}
+    await binding.check(await d.diagnose());
+    if(q.username)await writeJSON(state+'/login-identity.json',{username:q.username});
     if(runtime)await runtime.activate(session);interactive=false;
     return {tenant:tenant.id,account:await d.account(),fo:true};
   }

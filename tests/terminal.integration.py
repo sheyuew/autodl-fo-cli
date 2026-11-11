@@ -1,5 +1,6 @@
 """Exercise real terminal Ctrl+C handling; SSH/browser boundaries stay local."""
 import fcntl
+import base64
 import json
 import os
 from pathlib import Path
@@ -96,8 +97,15 @@ if '-L' in sys.argv:
         connection.close()
 q=json.loads(sys.stdin.read())
 with Path(AUDIT).open('a') as f:f.write(json.dumps(q)+'\\n')
-if q['op']=='notifications':result={'events':[],'cursor':0}
+if sys.argv[-1]=='fo-enroll':
+    import base64
+    key='ssh-ed25519 '+base64.b64encode(bytes.fromhex('0000000b')+b'ssh-ed25519'+bytes.fromhex('00000020')+bytes([7])*32).decode()
+    result={'kind':'fo-cli-invite','version':1,'host':'fo-u-fixture@example.test','port':22,'serverHostKey':key}
+elif q['op']=='notifications':result={'events':[],'cursor':0}
 elif q['op']=='login':result={'port':6081,'password':'LOCAL-TEST','tenant':'fixture'}
+elif q['op']=='login-password':result={'state':'authenticated','account':'fixture:alice@fixture'}
+elif q['op']=='viewer':result={'port':6081,'password':'LOCAL-TEST','tenant':'fixture'}
+elif q['op']=='status':result={'account':'fixture:alice@fixture','tasks':[]}
 elif q['op']=='activate':result={'tenant':'fixture','account':'fixture:test','fo':True}
 else:raise RuntimeError('Unexpected operation: '+q['op'])
 print(json.dumps({'ok':True,'result':result}))
@@ -146,14 +154,63 @@ print(json.dumps({'ok':True,'result':result}))
         terminal.expect('等待服务器通知')
         self.stopped(terminal)
 
-    def test_menu_login_ctrl_c_closes_viewer_and_restores_fo(self):
+    def test_menu_browser_ctrl_c_closes_viewer(self):
         terminal = self.session([])
         terminal.expect('选择序号: ')
-        terminal.send('3\n')
+        terminal.send('5\n')
         terminal.expect('已打开独立浏览器')
         self.stopped(terminal)
         requests = [json.loads(line)['op'] for line in self.audit.read_text().splitlines()]
-        self.assertEqual(requests, ['login', 'activate'])
+        self.assertEqual(requests, ['viewer'])
+
+    def test_terminal_login_hides_password_and_saves_only_account_and_connection(self):
+        terminal = self.session(['login'])
+        terminal.expect('AutoDL 账号')
+        terminal.send('alice@fixture\n')
+        terminal.expect('AutoDL 密码')
+        terminal.send('private-test-password\n')
+        terminal.expect('登录成功')
+        terminal.expect('选择序号: ')
+        terminal.send('2\n')
+        until = time.monotonic() + 4
+        while terminal.process.poll() is None and time.monotonic() < until:
+            terminal.drain()
+            time.sleep(0.02)
+        self.assertEqual(terminal.process.poll(), 0, terminal.transcript())
+        self.assertNotIn('private-test-password', terminal.transcript())
+        saved = (self.home / 'accounts.json').read_text()
+        self.assertIn('alice@fixture', saved)
+        self.assertNotIn('private-test-password', saved)
+
+    def test_invite_then_account_password_enters_menu_without_manual_key_steps(self):
+        b64 = lambda value: base64.urlsafe_b64encode(value).decode().rstrip('=')
+        key = 'ssh-ed25519 ' + base64.b64encode(bytes.fromhex('0000000b') + b'ssh-ed25519' + bytes.fromhex('00000020') + bytes([7]) * 32).decode()
+        payload = {'v': 1, 'i': '1' * 32, 't': 'fixture', 'h': 'example.test', 'p': 22,
+                   'k': key, 's': b64(bytes([3]) * 32), 'e': int(time.time() * 1000) + 3600000}
+        code = 'FO1-' + b64(json.dumps(payload).encode())
+        (self.home / 'config.json').unlink()
+        terminal = self.session([])
+        terminal.expect('粘贴一次性邀请码')
+        terminal.send(code + '\n')
+        terminal.expect('AutoDL 账号')
+        terminal.send('alice@fixture\n')
+        terminal.expect('AutoDL 密码')
+        terminal.send('private-test-password\n')
+        terminal.expect('登录成功')
+        terminal.expect('选择序号: ')
+        terminal.send('2\n')
+        until = time.monotonic() + 4
+        while terminal.process.poll() is None and time.monotonic() < until:
+            terminal.drain()
+            time.sleep(0.02)
+        self.assertEqual(terminal.process.poll(), 0, terminal.transcript())
+        self.assertNotIn(code, terminal.transcript())
+        self.assertNotIn('private-test-password', terminal.transcript())
+        config = json.loads((self.home / 'config.json').read_text())
+        self.assertTrue(Path(config['identityFile']).is_file())
+        requests = [json.loads(line) for line in self.audit.read_text().splitlines()]
+        self.assertEqual(list(requests[0]), ['publicKey'])
+        self.assertEqual([r['op'] for r in requests[1:]], ['login-password', 'status'])
 
 
 if __name__ == '__main__':

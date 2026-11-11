@@ -1,5 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';
+import {mkdtemp,rm,stat} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 const key='ssh-ed25519 '+Buffer.concat([Buffer.from([0,0,0,11]),Buffer.from('ssh-ed25519'),Buffer.from([0,0,0,32]),Buffer.alloc(32,7)]).toString('base64');
+test('member public files remain readable by sshd under a private enrollment service umask',async t=>{
+  const {writePublicFile}=await import('../lib/provision.mjs');const dir=await mkdtemp(join(tmpdir(),'fo-public-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const old=process.umask(0o077);try{await writePublicFile(join(dir,'authorized_keys'),key+'\n');}finally{process.umask(old);}
+  assert.equal((await stat(join(dir,'authorized_keys'))).mode&0o777,0o644);
+});
 test('provisioned SSH access is limited to that member RPC and viewer, with no inherited credentials',async()=>{
   const {memberFiles,cleanPublicKey}=await import('../lib/provision.mjs');
   assert.equal(cleanPublicKey(key+' alice@laptop'),key);

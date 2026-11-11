@@ -1,0 +1,22 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {spawn} from 'node:child_process';
+import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {once} from 'node:events';import {createServer} from 'node:http';
+import {PipeCDP} from '../lib/cdp.mjs';
+test('terminal login drives the official form shape, submits once and returns no password',async t=>{
+  const {submitLogin}=await import('../lib/login.mjs');
+  const dir=await mkdtemp(join(tmpdir(),'fo-login-'));
+  const chrome=spawn(process.env.FO_TEST_CHROME,['--headless=new','--remote-debugging-pipe',`--user-data-dir=${dir}`,'--no-first-run','about:blank'],{stdio:['ignore','ignore','ignore','pipe','pipe']});
+  const cdp=new PipeCDP(chrome.stdio[3],chrome.stdio[4]);
+  const web=createServer((q,r)=>{r.setHeader('Content-Type','text/html; charset=utf-8');r.end(`<input name="username"><input name="password" type="password"><button onclick="window.submits=(window.submits||0)+1;if(document.querySelector('[name=username]').value==='alice@a'&&document.querySelector('[name=password]').value==='test-secret'){localStorage.setItem('token','fixture');localStorage.setItem('user',JSON.stringify({uuid:'a',sub_name:'alice@a'}));}">登录</button>`);});
+  web.listen(0,'127.0.0.1');await once(web,'listening');
+  t.after(async()=>{chrome.kill();await once(chrome,'exit');web.close();await rm(dir,{recursive:true,force:true});});
+  const {targetInfos}=await cdp.call('Target.getTargets'),{sessionId}=await cdp.call('Target.attachToTarget',{targetId:targetInfos.find(x=>x.type==='page').targetId,flatten:true});
+  await cdp.call('Page.navigate',{url:`http://127.0.0.1:${web.address().port}`},sessionId);
+  const result=await submitLogin(cdp,sessionId,{username:'alice@a',password:'test-secret'},{timeout:3000});
+  if(result.state!=='authenticated')console.log('Login fixture state:',await cdp.evaluate(sessionId,"({ready:document.readyState,buttons:[...document.querySelectorAll('button')].map(x=>x.textContent),submits:window.submits,inputs:[...document.querySelectorAll('input')].map(x=>x.name)})"));
+  assert.deepEqual(result,{state:'authenticated',account:'a:alice@a'});
+  assert.equal(await cdp.evaluate(sessionId,'window.submits'),1);
+  assert.ok(!JSON.stringify(result).includes('test-secret'));
+  await cdp.evaluate(sessionId,"localStorage.clear();document.body.innerHTML='<input name=phone><input name=password type=password><div class=aliyun-captcha>请完成验证</div><button>登录</button>'");
+  const challenge=await submitLogin(cdp,sessionId,{username:'13800000000',password:'other-secret'},{timeout:500});
+  assert.equal(challenge.state,'verification');
+});

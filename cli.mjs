@@ -5,6 +5,7 @@ import {createInterface} from 'node:readline/promises';import {confirmAndStart} 
 import {sshArgs} from './lib/connection.mjs';import {readJSON,writeJSON} from './lib/storage.mjs';
 import {desktopNotification,eventText,openViewer} from './lib/local-ui.mjs';
 import {clientSettings,createMemberKey,importConnection,defaultKey} from './lib/client-settings.mjs';
+import {Writable} from 'node:stream';import {Accounts} from './lib/accounts.mjs';import {joinInvitation} from './lib/join.mjs';
 const base=dirname(fileURLToPath(import.meta.url));let config,connectionBase=base,configPath,stateBase=base;
 function rpc(request){return new Promise((resolve,reject)=>{
   const child=spawn('ssh',sshArgs(config,connectionBase),{stdio:['pipe','pipe','pipe']});
@@ -16,6 +17,40 @@ const catalog=(query,args={})=>rpc({op:'catalog',query,args});
 let rl;
 const terminal=()=>{if(!process.stdin.isTTY||!process.stdout.isTTY)throw new Error('交互选择和启动确认必须在真实终端运行；可用 fo plan 文件.json 只预览。');rl??=createInterface({input:process.stdin,output:process.stdout});return rl;};
 const ask=q=>terminal().question(q);
+async function secret(label){
+  if(!process.stdin.isTTY||!process.stdout.isTTY)throw new Error('密码和邀请码必须在真实终端输入');
+  rl?.close();rl=null;
+  const hidden=createInterface({input:process.stdin,output:new Writable({write(chunk,encoding,callback){callback();}}),terminal:true});
+  process.stdout.write(label);
+  try{return await hidden.question('');}finally{hidden.close();process.stdout.write('\n');}
+}
+async function joinAccount(){
+  const accounts=new Accounts(configPath);
+  if(config&&!(await accounts.list()).some(x=>x.config.host===config.host))await accounts.remember({account:'connection:'+config.host,username:'原连接（'+config.host+'）',config});
+  let code=await secret('粘贴一次性邀请码（输入隐藏）: ');
+  try{config=await joinInvitation(code.trim(),configPath);}finally{code=undefined;}
+  connectionBase=stateBase=dirname(configPath);
+  console.log('接入成功，密钥和连接已自动保存在本机。');await loginAccount();
+}
+async function loginAccount(){
+  const accounts=new Accounts(configPath),current=(await accounts.list()).find(x=>x.config.host===config.host&&!x.account.startsWith('connection:'));
+  const username=(await ask(`AutoDL 账号${current?' ['+current.username+']':''}: `)).trim()||current?.username;
+  if(!username)throw new Error('请输入 AutoDL 登录账号');
+  let password=await secret('AutoDL 密码（输入隐藏，不保存）: '),result;
+  try{result=await rpc({op:'login-password',username,password});}finally{password=undefined;}
+  if(result.state==='failed')throw new Error(result.message||'登录失败，请核对账号密码');
+  if(result.state==='verification'){
+    console.log((result.message||'平台要求额外验证')+'，将打开浏览器，完成后回终端按 Ctrl+C。');
+    await openViewer(config,connectionBase,await rpc({op:'viewer'}));result=await rpc({op:'activate',username});
+  }
+  if(!result.account)throw new Error('未能确认 AutoDL 登录，请重试或运行 fo login-browser');
+  await accounts.remember({account:result.account,username,config});console.log(`登录成功：${username}\n以后可用 fo switch 切换账号。`);
+}
+async function switchAccount(username){
+  const accounts=new Accounts(configPath),rows=await accounts.list();
+  if(!username){const [row]=await select('选择 AutoDL 账号',rows,x=>`${x.username}${x.config.host===config?.host?'（当前）':''}`);username=row.account;}
+  config=await accounts.select(username);connectionBase=stateBase=dirname(configPath);console.log('已切换账号连接。运行 fo 查看该账号任务；登录过期时运行 fo login。');
+}
 async function select(title,rows,label,{multiple=false}={}){
   if(!rows.length)throw new Error(title+'没有可选项');console.log('\n'+title);
   rows.forEach((row,i)=>console.log(`  ${i+1}. ${label(row)}`));
@@ -100,39 +135,47 @@ async function keygen(key){
 }
 async function setup(file,key){
   if(!file){
-    const [action]=await select('首次接入',[{id:'key',name:'生成/查看我的接入公钥，发给管理员'},{id:'import',name:'导入管理员发来的连接文件'}],x=>x.name);
+    const [action]=await select('首次接入',[{id:'code',name:'输入一次性邀请码（推荐，自动配置）'},{id:'key',name:'高级：生成/查看接入公钥'},{id:'import',name:'高级：导入连接文件'}],x=>x.name);
+    if(action.id==='code'){await joinAccount();return;}
     if(action.id==='key'){await keygen(key);return;}
     const pathInput=value=>value.trim().replace(/^(['"])(.*)\1$/,'$2').replace(/\\ /g,' ');
     file=pathInput(await ask('连接文件路径（可拖入终端）: '));
     key=pathInput(await ask(`本机专用私钥路径 [${defaultKey()}]: `))||defaultKey();
   }
   config=await importConnection(file,{configPath,keyPath:key});
-  console.log(`已保存连接：${config.host}\n下一步运行 ./fo login，登录后回终端 Ctrl+C，再运行 ./fo 创建任务。`);
+  console.log(`已保存连接：${config.host}\n下一步运行 ./fo login，在终端输入 AutoDL 账号密码，再运行 ./fo 创建任务。`);
 }
-function help(){console.log('fo                打开操作菜单\nfo keygen         生成/查看接入公钥，私钥保留本机\nfo setup 文件     导入管理员提供的连接文件\nfo wizard         创建任务，最后 yes/no 确认\nfo login          登录自己的 AutoDL 账号\nfo status         查看任务\nfo watch          等待终端和本地桌面提醒\nfo notifications  查看历史通知\nfo browser        打开自己的服务器浏览器\nfo doctor         检查连接和登录\nfo notify-test    测试本地桌面通知\nfo plan 文件.json  仅生成任务预览\nfo submit 计划ID   再次确认后提交\nfo result 计划ID   查询提交结果，不重复提交\n\nkeygen/setup 可用 --key 私钥路径；无需安装 npm 依赖。\n配置文件：'+configPath);}
+function help(){console.log('fo                打开操作菜单\nfo keygen         生成/查看接入公钥，私钥保留本机\nfo setup 文件     导入管理员提供的连接文件\nfo wizard         创建任务，最后 yes/no 确认\nfo login          在终端登录 AutoDL，密码隐藏且不保存\nfo join           输入一次性邀请码，自动接入并登录\nfo accounts       查看已保存的 AutoDL 账号\nfo switch         选择并切换 AutoDL 账号\nfo login-browser  浏览器登录备用方式\nfo status         查看任务\nfo watch          等待终端和本地桌面提醒\nfo notifications  查看历史通知\nfo browser        打开自己的服务器浏览器\nfo doctor         检查连接和登录\nfo notify-test    测试本地桌面通知\nfo plan 文件.json  仅生成任务预览\nfo submit 计划ID   再次确认后提交\nfo result 计划ID   查询提交结果，不重复提交\n\nkeygen/setup 可用 --key 私钥路径；无需安装 npm 依赖。\n配置文件：'+configPath);}
 async function main(){
   const settings=await clientSettings(base);config=settings.config;configPath=settings.path;connectionBase=stateBase=settings.base;
   const words=process.argv.slice(2),keyAt=words.indexOf('--key'),key=keyAt>=0?words[keyAt+1]:undefined;
   if(keyAt>=0&&!key)throw new Error('--key 后需要填写私钥路径');
   if(keyAt>=0)words.splice(keyAt,2);let [cmd,arg]=words;
+  while(true){
   if(['help','--help','-h'].includes(cmd)){help();return;}
   if(cmd==='keygen'){await keygen(key);return;}
-  if(cmd==='setup'){await setup(arg,key);return;}
+  if(cmd==='setup'){await setup(arg,key);if(config&&process.stdin.isTTY){cmd=undefined;continue;}return;}
+  if(cmd==='join'){await joinAccount();cmd=undefined;continue;}
+  if(cmd==='accounts'){for(const row of await new Accounts(configPath).list())console.log(row.username+(row.config.host===config?.host?'（当前）':''));return;}
+  if(cmd==='switch'){await switchAccount(arg);cmd=undefined;continue;}
   if(cmd==='notify-test'){await desktopNotification('AutoDL 提醒测试','这是一条本地测试消息，不代表抢卡成功。');console.log('已发送桌面提醒，请检查系统通知权限。');return;}
-  if(!config){if(cmd)throw new Error('尚未配置连接。请先运行 fo keygen，再导入管理员给的连接文件：fo setup 文件路径');await setup(undefined,key);return;}
+  if(!config){if(cmd)throw new Error('尚未配置连接。请先运行 fo join，粘贴管理员提供的一次性邀请码');await joinAccount();continue;}
   if(!cmd){
-    const [action]=await select('AutoDL 远程抢卡',[{id:'wizard',name:'创建抢卡任务'},{id:'status',name:'查看任务状态'},{id:'login',name:'首次登录/重新登录 AutoDL'},{id:'watch',name:'等待完成提醒'},{id:'browser',name:'查看远程浏览器'},{id:'doctor',name:'检查连接'},{id:'notifications',name:'查看历史通知'},{id:'setup',name:'导入新的连接文件'}],x=>x.name);cmd=action.id;
+    const [action]=await select('AutoDL 远程抢卡',[{id:'wizard',name:'创建抢卡任务'},{id:'status',name:'查看任务状态'},{id:'login',name:'终端登录/重新登录 AutoDL'},{id:'watch',name:'等待完成提醒'},{id:'browser',name:'查看远程浏览器'},{id:'doctor',name:'检查连接'},{id:'notifications',name:'查看历史通知'},{id:'setup',name:'接入设置'},{id:'switch',name:'切换 AutoDL 账号'},{id:'join',name:'添加 AutoDL 账号（邀请码）'}],x=>x.name);cmd=action.id;
     // Let long-running actions receive OS signals; prompting actions reopen it.
     rl.close();rl=null;
   }
-  if(cmd==='setup'){await setup();return;}
+  if(cmd==='setup'){await setup();cmd=undefined;continue;}
+  if(cmd==='join'){await joinAccount();cmd=undefined;continue;}
+  if(cmd==='switch'){await switchAccount();cmd=undefined;continue;}
   if(cmd==='wizard')await wizard();
   else if(cmd==='status'||cmd==='doctor')console.log(JSON.stringify(await rpc({op:cmd}),null,2));
   else if(cmd==='plan'){if(!arg)throw new Error('用法：fo plan 配置.json');const plan=await rpc({op:'prepare',spec:JSON.parse(await readFile(arg,'utf8'))});console.log(describePlan(plan)+`\n计划 ID：${plan.id}\n仅预览，未提交。提交命令：fo submit ${plan.id}`);}
   else if(cmd==='submit'){if(!arg)throw new Error('用法：fo submit 计划ID');const plan=await rpc({op:'result',id:arg});if(plan.state==='prepared')await review(plan);else printResult(plan);}
   else if(cmd==='result'){if(!arg)throw new Error('用法：fo result 计划ID');printResult(await rpc({op:'result',id:arg}));}
   else if(cmd==='browser')await openViewer(config,connectionBase,await rpc({op:'viewer'}));
-  else if(cmd==='login'){
+  else if(cmd==='login'){await loginAccount();cmd=undefined;continue;}
+  else if(cmd==='login-browser'){
     console.log('将在自己的远程浏览器打开 AutoDL。登录后回到此终端按 Ctrl+C 完成登录并恢复 Fo。登录期间该环境的 Fo 执行可能暂停，任务记录会保留。');
     await openViewer(config,connectionBase,await rpc({op:'login'}));
     console.log(JSON.stringify(await rpc({op:'activate'}),null,2));
@@ -140,5 +183,7 @@ async function main(){
   else if(cmd==='watch')await watch();
   else if(cmd==='notifications'){const result=await rpc({op:'notifications',after:0});for(const e of result.events)console.log(eventText(e)+'\n');if(!result.events.length)console.log('暂无通知。');if(result.error)console.log('当前监控提示：'+result.error);}
   else throw new Error('未知命令；运行 fo help');
+  return;
+  }
 }
 try{await main();}catch(e){console.error('错误：'+e.message);process.exitCode=1;}finally{rl?.close();}

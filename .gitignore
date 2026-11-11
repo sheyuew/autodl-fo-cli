@@ -1,5 +1,7 @@
 # Personal connection and login state
 config.json
+accounts.json
+*.invite-code
 *.connection.json
 !examples/*.connection.json
 known_hosts

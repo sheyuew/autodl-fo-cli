@@ -116,4 +116,42 @@ RestartSec=5
 UMask=0077
 UNIT
 systemctl daemon-reload
-printf '多账号服务模板已安装；原 fo-autodl.target 未改动。使用 fo-admin add 添加成员。\n'
+if ! id fo-enroll >/dev/null 2>&1; then
+  useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /bin/sh --password '*' fo-enroll
+fi
+install -d -m 0700 /var/lib/fo-enrollment
+touch /etc/fo-autodl/enrollment_keys
+chmod 0644 /etc/fo-autodl/enrollment_keys
+cat > /etc/ssh/sshd_config.d/69-fo-enroll.conf <<'SSH'
+Match User fo-enroll
+    AuthorizedKeysFile /etc/fo-autodl/enrollment_keys
+    PermitTTY no
+    DisableForwarding yes
+    PermitUserRC no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+Match all
+SSH
+/usr/sbin/sshd -t
+systemctl reload ssh
+cat > /etc/systemd/system/fo-enroll.service <<'UNIT'
+[Unit]
+Description=Fo one-time invitation service
+After=network.target
+[Service]
+User=root
+Group=fo-enroll
+RuntimeDirectory=fo-enroll
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=/usr/bin/node /opt/fo-autodl/multi/enroll-server.mjs
+Restart=on-failure
+RestartSec=3
+PrivateTmp=yes
+ProtectHome=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now fo-enroll.service
+printf '多账号及邀请码服务已安装；原浏览器未重启。使用 fo-admin invite-code 新代号 服务器地址 生成邀请码。\n'

@@ -1,0 +1,25 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,mkdir,writeFile,readFile,rm,readdir} from 'node:fs/promises';
+import {tmpdir} from 'node:os';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
+import {EnrollmentStore,decodeInvite,bootstrapIdentity} from '../lib/enrollment.mjs';import {joinInvitation} from '../lib/join.mjs';
+const key='ssh-ed25519 '+Buffer.concat([Buffer.from([0,0,0,11]),Buffer.from('ssh-ed25519'),Buffer.from([0,0,0,32]),Buffer.alloc(32,7)]).toString('base64');
+test('invitation redemption generates the member key locally, pins SSH and reuses the key after connection loss',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'fo-join-test-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const store=new EnrollmentStore(join(dir,'server')),code=await store.issue({tenant:'alice',host:'example.test',serverHostKey:key}),invite=decodeInvite(code);
+  const bin=join(dir,'bin');await mkdir(bin);const audit=join(dir,'audit.jsonl');
+  await writeFile(join(bin,'ssh'),`#!${process.execPath}\nimport{readFileSync,appendFileSync,writeFileSync}from'node:fs';import{execFileSync}from'node:child_process';
+const args=process.argv.slice(2);if(args.at(-1)!=='fo-enroll'||!args.includes('StrictHostKeyChecking=yes'))process.exit(2);
+const identity=args[args.indexOf('-i')+1],actual=execFileSync('ssh-keygen',['-y','-f',identity],{encoding:'utf8'}).trim().split(/\\s+/).slice(0,2).join(' ');
+if(actual!==${JSON.stringify(bootstrapIdentity(invite.seed).publicKey)})process.exit(3);
+let input='';for await(const p of process.stdin)input+=p;const q=JSON.parse(input);
+if(Object.keys(q).join(',')!=='publicKey')process.exit(4);
+appendFileSync(${JSON.stringify(audit)},JSON.stringify({publicKey:q.publicKey,bootstrap:identity})+'\\n');
+process.stdout.write(JSON.stringify({ok:true,result:{kind:'fo-cli-invite',version:1,host:'fo-u-alice@example.test',port:22,serverHostKey:${JSON.stringify(key)}}})+'\\n');`,{mode:0o755});
+  const old=process.env.PATH;process.env.PATH=bin+':'+old;t.after(()=>{process.env.PATH=old;});
+  const configPath=join(dir,'client','config.json');const config=await joinInvitation(code,configPath),again=await joinInvitation(code,configPath);
+  assert.deepEqual(again,config);assert.equal(config.host,'fo-u-alice@example.test');
+  const rows=(await readFile(audit,'utf8')).trim().split('\n').map(JSON.parse);assert.equal(rows.length,2);assert.equal(rows[0].publicKey,rows[1].publicKey);
+  const derived=execFileSync('ssh-keygen',['-y','-f',config.identityFile],{encoding:'utf8'}).trim().split(/\s+/).slice(0,2).join(' ');assert.equal(rows[0].publicKey,derived);
+  assert.equal(await readFile(join(dir,'client',config.knownHostsFile),'utf8'),'example.test '+key+'\n');
+  for(const row of rows)await assert.rejects(readFile(row.bootstrap),{code:'ENOENT'});
+  assert.equal((await readdir(join(dir,'client','keys'))).length,2);
+});
