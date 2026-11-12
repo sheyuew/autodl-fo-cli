@@ -44,6 +44,7 @@ async function loginAccount(){
     await openViewer(config,connectionBase,await rpc({op:'viewer'}));result=await rpc({op:'activate',username});
   }
   if(!result.account)throw new Error('未能确认 AutoDL 登录，请重试或运行 fo login-browser');
+  if(result.backend==='native-http'){config={...config,backend:'native-http'};await writeJSON(configPath,config);}
   await accounts.remember({account:result.account,username,config});console.log(`登录成功：${username}\n以后可用 fo switch 切换账号。`);
 }
 async function switchAccount(username){
@@ -145,7 +146,7 @@ async function setup(file,key){
   config=await importConnection(file,{configPath,keyPath:key});
   console.log(`已保存连接：${config.host}\n下一步运行 ./fo login，在终端输入 AutoDL 账号密码，再运行 ./fo 创建任务。`);
 }
-function help(){console.log('fo                打开操作菜单\nfo keygen         生成/查看接入公钥，私钥保留本机\nfo setup 文件     导入管理员提供的连接文件\nfo wizard         创建任务，最后 yes/no 确认\nfo login          在终端登录 AutoDL，密码隐藏且不保存\nfo join           输入一次性邀请码，自动接入并登录\nfo accounts       查看已保存的 AutoDL 账号\nfo switch         选择并切换 AutoDL 账号\nfo login-browser  浏览器登录备用方式\nfo status         查看任务\nfo watch          等待终端和本地桌面提醒\nfo notifications  查看历史通知\nfo browser        打开自己的服务器浏览器\nfo doctor         检查连接和登录\nfo notify-test    测试本地桌面通知\nfo plan 文件.json  仅生成任务预览\nfo submit 计划ID   再次确认后提交\nfo result 计划ID   查询提交结果，不重复提交\n\nkeygen/setup 可用 --key 私钥路径；无需安装 npm 依赖。\n配置文件：'+configPath);}
+function help(){console.log('fo                打开操作菜单\nfo http           HTTP 查询与网盘传输菜单\nfo keygen         生成/查看接入公钥，私钥保留本机\nfo setup 文件     导入管理员提供的连接文件\nfo wizard         创建任务，最后 yes/no 确认\nfo login          在终端登录 AutoDL，密码隐藏且不保存\nfo join           输入一次性邀请码，自动接入并登录\nfo accounts       查看已保存的 AutoDL 账号\nfo switch         选择并切换 AutoDL 账号\nfo login-browser  浏览器登录备用方式\nfo status         查看任务\nfo watch          等待终端和本地桌面提醒\nfo notifications  查看历史通知\nfo browser        打开自己的服务器浏览器\nfo doctor         检查连接和登录\nfo notify-test    测试本地桌面通知\nfo plan 文件.json  仅生成任务预览\nfo submit 计划ID   再次确认后提交\nfo result 计划ID   查询提交结果，不重复提交\n\nkeygen/setup 可用 --key 私钥路径；无需安装 npm 依赖。\n配置文件：'+configPath);}
 async function main(){
   const settings=await clientSettings(base);config=settings.config;configPath=settings.path;connectionBase=stateBase=settings.base;
   const words=process.argv.slice(2),keyAt=words.indexOf('--key'),key=keyAt>=0?words[keyAt+1]:undefined;
@@ -160,6 +161,9 @@ async function main(){
   if(cmd==='switch'){await switchAccount(arg);cmd=undefined;continue;}
   if(cmd==='notify-test'){await desktopNotification('AutoDL 提醒测试','这是一条本地测试消息，不代表抢卡成功。');console.log('已发送桌面提醒，请检查系统通知权限。');return;}
   if(!config){if(cmd)throw new Error('尚未配置连接。请先运行 fo join，粘贴管理员提供的一次性邀请码');await joinAccount();continue;}
+  if(cmd==='http'||(!cmd&&config.backend==='native-http')){
+    rl?.close();rl=null;const {run}=await import('./native/cli.mjs');await run({remoteConfigPath:configPath});return;
+  }
   if(!cmd){
     const [action]=await select('AutoDL 远程抢卡',[{id:'wizard',name:'创建抢卡任务'},{id:'status',name:'查看任务状态'},{id:'login',name:'终端登录/重新登录 AutoDL'},{id:'watch',name:'等待完成提醒'},{id:'browser',name:'查看远程浏览器'},{id:'doctor',name:'检查连接'},{id:'notifications',name:'查看历史通知'},{id:'setup',name:'接入设置'},{id:'switch',name:'切换 AutoDL 账号'},{id:'join',name:'添加 AutoDL 账号（邀请码）'}],x=>x.name);cmd=action.id;
     // Let long-running actions receive OS signals; prompting actions reopen it.

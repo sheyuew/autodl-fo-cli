@@ -4,7 +4,7 @@ if ! command -v node >/dev/null 2>&1; then
   printf '请先安装 Node.js LTS：https://nodejs.org/zh-cn/download\n安装后重新打开终端，再运行本程序。\n' >&2
   exit 1
 fi
-if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'; then
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
   printf 'Node.js 版本过旧，请安装官网 LTS 版本。\n' >&2
   exit 1
 fi

@@ -85,7 +85,7 @@ class TerminalControls(unittest.TestCase):
         bin_dir.mkdir()
         self.audit = self.home / 'rpc.jsonl'
         fake_ssh = '''#!/usr/bin/env python3
-import json, socket, sys
+import json, socket, sys, os
 from pathlib import Path
 if '-L' in sys.argv:
     address=sys.argv[sys.argv.index('-L')+1]
@@ -103,7 +103,10 @@ if sys.argv[-1]=='fo-enroll':
     result={'kind':'fo-cli-invite','version':1,'host':'fo-u-fixture@example.test','port':22,'serverHostKey':key}
 elif q['op']=='notifications':result={'events':[],'cursor':0}
 elif q['op']=='login':result={'port':6081,'password':'LOCAL-TEST','tenant':'fixture'}
-elif q['op']=='login-password':result={'state':'authenticated','account':'fixture:alice@fixture'}
+elif q['op']=='login-password':
+    result={'state':'authenticated','account':'fixture:alice@fixture'}
+    if os.environ.get('FO_TEST_NATIVE'):result.update(backend='native-http',identity={'id':'fixture','username':'alice@fixture','subaccount':True})
+elif q['op']=='doctor' and os.environ.get('FO_TEST_NATIVE'):result={'backend':'native-http','authenticated':True,'identity':{'id':'fixture','username':'alice@fixture','subaccount':True}}
 elif q['op']=='viewer':result={'port':6081,'password':'LOCAL-TEST','tenant':'fixture'}
 elif q['op']=='status':result={'account':'fixture:alice@fixture','tasks':[]}
 elif q['op']=='activate':result={'tenant':'fixture','account':'fixture:test','fo':True}
@@ -211,6 +214,36 @@ print(json.dumps({'ok':True,'result':result}))
         requests = [json.loads(line) for line in self.audit.read_text().splitlines()]
         self.assertEqual(list(requests[0]), ['publicKey'])
         self.assertEqual([r['op'] for r in requests[1:]], ['login-password', 'status'])
+
+    def test_native_http_entry_reuses_existing_connection_without_opening_a_browser(self):
+        self.env['FO_TEST_NATIVE']='1'
+        terminal=self.session(['http'])
+        terminal.expect('选择操作')
+        terminal.send('q\n')
+        until=time.monotonic()+4
+        while terminal.process.poll() is None and time.monotonic()<until:
+            terminal.drain()
+            time.sleep(0.02)
+        self.assertEqual(terminal.process.returncode,0,terminal.transcript())
+        requests=[json.loads(line)['op'] for line in self.audit.read_text().splitlines()]
+        self.assertEqual(requests,['doctor'])
+
+    def test_native_login_marks_connection_and_enters_http_menu(self):
+        self.env['FO_TEST_NATIVE']='1'
+        terminal=self.session(['login'])
+        terminal.expect('AutoDL 账号')
+        terminal.send('alice@fixture\n')
+        terminal.expect('AutoDL 密码')
+        terminal.send('private-test-password\n')
+        terminal.expect('选择操作')
+        terminal.send('q\n')
+        until=time.monotonic()+4
+        while terminal.process.poll() is None and time.monotonic()<until:
+            terminal.drain()
+            time.sleep(0.02)
+        self.assertEqual(terminal.process.returncode,0,terminal.transcript())
+        self.assertNotIn('private-test-password',terminal.transcript())
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['backend'],'native-http')
 
 
 if __name__ == '__main__':

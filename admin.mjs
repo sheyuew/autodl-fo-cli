@@ -44,8 +44,8 @@ async function add(id,pubPath){
   run('chown',['-R',t.user+':'+t.user,t.state]);
   await writeConfig(c);
   run('systemctl',['daemon-reload']);run('systemctl',['enable','--now','fo-user@'+id+'.target']);
-  console.log(`已创建 ${id}，独立用户 ${t.user}，浏览器端口 ${t.webPort}。`);
-  console.log('成员运行 ./fo login 完成官方登录后，自动进入独立 Fo 任务窗口。');
+  console.log(`已创建 ${id}，独立用户 ${t.user}。`);
+  console.log('成员运行 ./fo login 后进入终端；HTTP 服务器使用 ./fo http。');
 }
 async function invitation(id,host){
   const c=await config(id),key=await readFile('/etc/ssh/ssh_host_ed25519_key.pub','utf8');
@@ -60,6 +60,7 @@ async function bundle(id,host){
   for(const name of ['THIRD_PARTY.md','开始使用.command'])if(await exists(join(base,name)))await cp(join(base,name),join(dest,name));
   if(await exists(base+'/docs'))await cp(base+'/docs',dest+'/docs',{recursive:true});
   for(const name of await readdir(base+'/lib'))if(name.endsWith('.mjs'))await cp(join(base,'lib',name),join(dest,'lib',name));
+  if(await exists(base+'/native'))await cp(base+'/native',dest+'/native',{recursive:true});
   await chmod(dest+'/fo',0o755);
   await writeJSON(dest+'/config.json',{host:t.user+'@'+host,port:22,identityFile:'~/.ssh/fo-autodl',protocol:'multi-v1',knownHostsFile:'known_hosts'});
   const hostKey=(await readFile('/etc/ssh/ssh_host_ed25519_key.pub','utf8')).trim().split(/\s+/).slice(0,2).join(' ');
