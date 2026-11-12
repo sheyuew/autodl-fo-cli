@@ -5,10 +5,12 @@ import {closeBrowser} from './lib/shutdown.mjs';
 import {tenantRuntime,AccountBinding} from './lib/tenant.mjs';import {Notifications} from './lib/notifications.mjs';
 import {WorkQueue} from './lib/queue.mjs';
 import {FoRuntime,RUNNER_URL} from './lib/runtime.mjs';
-import {submitLogin} from './lib/login.mjs';import {readJSON,writeJSON} from './lib/storage.mjs';
+import {submitLogin,requireLogin} from './lib/login.mjs';import {readJSON,writeJSON} from './lib/storage.mjs';
+import {RpcAudit,rpcErrorCode} from './lib/audit.mjs';
 process.umask(0o077);
 const tenant=tenantRuntime(process.env.FO_TENANT_CONFIG?JSON.parse(await readFile(process.env.FO_TENANT_CONFIG,'utf8')):null);
 const {state,socket}=tenant,binding=new AccountBinding(state),notifications=new Notifications(state,tenant.id);
+const audit=new RpcAudit(tenant.id);
 const chrome=spawn('/opt/fo-autodl/browser/chrome-linux64/chrome',[
   '--remote-debugging-pipe',`--user-data-dir=${state}/profile`,
   ...(tenant.id!=='owner'?['--disable-gpu']:[]),
@@ -36,7 +38,7 @@ async function driver({activate=true}={}){
   }
   return d;
 }
-async function dispatch(q){
+async function dispatch(q,trace){
   if(!q||typeof q!=='object'||'tenant' in q||'socket' in q||'account' in q)throw new Error('不能通过请求切换账号');
   if(q.op==='notifications')return notifications.list(q.after??0);
   if(q.op==='viewer')return {port:tenant.webPort,password:(await readFile(state+'/vnc-secret','utf8')).trim(),tenant:tenant.id};
@@ -46,6 +48,7 @@ async function dispatch(q){
     const bound=await readJSON(state+'/account-binding.json',null),saved=await readJSON(state+'/login-identity.json',null);
     if(bound&&saved&&saved.username!==username)throw new Error('该环境已绑定另一个 AutoDL 账号，请切换已保存账号或用新邀请码添加账号');
     const d=await driver({activate:false}),health=await d.diagnose();
+    trace?.login({state:health.authenticated?'authenticated':'unauthenticated',...health});
     if(bound&&!saved){
       const user=await cdp.evaluate(session,"JSON.parse(localStorage.getItem('user')||'{}')");
       if(![user.sub_name,user.username,user.user_name,user.phone].includes(username))throw new Error('该环境已有绑定账号，请使用原登录名；其他账号需新邀请码');
@@ -53,7 +56,7 @@ async function dispatch(q){
     if(health.authenticated&&bound&&(!saved||saved.username===username)){await binding.check(health);await writeJSON(state+'/login-identity.json',{username});if(runtime&&!health.fo)await runtime.activate(session);interactive=false;return {state:'authenticated',account:health.account};}
     interactive=true;
     await cdp.call('Page.navigate',{url:username.includes('@')?'https://www.autodl.com/subAccountLogin':'https://www.autodl.com/login'},session);
-    let result;try{result=await submitLogin(cdp,session,{username,password});}catch{throw new Error('自动登录未完成，请检查网络或使用 fo login-browser');}finally{q.password=undefined;}
+    let result;try{result=await submitLogin(cdp,session,{username,password},{onProgress:value=>trace?.login(value)});}finally{q.password=undefined;}
     if(result.state==='authenticated'){
       await binding.check(await d.diagnose());await writeJSON(state+'/login-identity.json',{username});
       if(runtime)await runtime.activate(session);interactive=false;
@@ -67,8 +70,8 @@ async function dispatch(q){
   }
   if(q.op==='activate'){
     const d=await driver({activate:false});
-    if(q.username){const user=await cdp.evaluate(session,"JSON.parse(localStorage.getItem('user')||'{}')");if(![user.sub_name,user.username,user.user_name,user.phone].includes(q.username))throw new Error('浏览器登录账号与终端输入不符，请核对后重试');}
-    await binding.check(await d.diagnose());
+    const health=await requireLogin(cdp,session,q.username,{onProgress:value=>trace?.login(value)});
+    await binding.check(health);
     if(q.username)await writeJSON(state+'/login-identity.json',{username:q.username});
     if(runtime)await runtime.activate(session);interactive=false;
     return {tenant:tenant.id,account:await d.account(),fo:true};
@@ -94,11 +97,13 @@ const server=createServer(conn=>{
   conn.on('data',chunk=>{
     if(done)return;data+=chunk;if(Buffer.byteLength(data)>128*1024){done=true;conn.end(JSON.stringify({ok:false,error:'请求过大'})+'\n');return;}
     if(!data.includes('\n'))return;done=true;
+    let q;try{q=JSON.parse(data.slice(0,data.indexOf('\n')));}catch{conn.end(JSON.stringify({ok:false,error:'请求格式错误'})+'\n');return;}
+    data='';const trace=audit.request(q?.op);
     const handle=async()=>{
-      try{const result=await dispatch(JSON.parse(data.slice(0,data.indexOf('\n'))));conn.end(JSON.stringify({ok:true,result})+'\n');}
-      catch(e){conn.end(JSON.stringify({ok:false,error:e.message})+'\n');}
+      try{const result=await trace.run(()=>dispatch(q,trace));conn.end(JSON.stringify({ok:true,result,requestId:trace.id})+'\n');}
+      catch(e){conn.end(JSON.stringify({ok:false,error:e.message+'（请求编号：'+trace.id+'）',code:rpcErrorCode(e),requestId:trace.id})+'\n');}
+      finally{if(q&&typeof q==='object')q.password=undefined;}
     };
-    let q;try{q=JSON.parse(data.slice(0,data.indexOf('\n')));}catch{void handle();return;}
     if(['viewer','notifications'].includes(q?.op))void handle();else void queue.run(handle);
   });
   conn.on('error',()=>{});

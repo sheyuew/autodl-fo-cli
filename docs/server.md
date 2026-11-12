@@ -84,6 +84,16 @@ fo-admin disable alice
 
 查看日志：`journalctl -u fo-browser@alice.service -n 80`。重启某个成员：`systemctl restart fo-browser@alice.service`，会短暂中断该成员监控。浏览器正常退出会刷新持久化状态。
 
+登录排查：
+
+```bash
+journalctl -u fo-browser@alice.service --since '30 minutes ago' --no-pager -o cat
+```
+
+网关为每次请求记录 `rpc.received`、`rpc.started`、`rpc.finished`，用 `requestId` 关联，包含排队时间、执行耗时和错误代码。登录还记录 `login.stage`：页面加载、输入框是否找到、提交、等待结果、验证码、超时及登录状态。终端报错带请求编号，可在上述日志中定位。`LOGIN_REQUIRED` 表示尚未登录成功；只有已登录且身份不同才返回 `ACCOUNT_MISMATCH`。
+
+日志只保存允许的诊断字段，不记录账号密码、Token、邀请码、浏览器存储、原始请求响应或异常原文。升级前没有记录的登录细节无法补回，需要重新登录一次采集。日志由 systemd journal 管理，保留周期遵循服务器 journald 配置。
+
 ## 所有者旧环境
 
 `install-server.sh` 用于把 CLI 网关接入已安装篡改猴的所有者环境，会重启 `fo-browser.service`。它要求扩展已经持久安装，使用前请在维护窗口备份浏览器资料并核对现有任务。

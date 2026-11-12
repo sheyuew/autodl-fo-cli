@@ -20,10 +20,13 @@ test('an invitation binds once, survives restart, permits same-key recovery and 
   const {EnrollmentStore,decodeInvite}=await import('../lib/enrollment.mjs');const dir=await fixture(t);
   let provisions=0;const provision=async record=>{provisions++;return {host:'fo-u-'+record.tenant+'@server.example.test'};};
   let store=new EnrollmentStore(dir,{provision});const code=await store.issue({tenant:'alice',host:'server.example.test',serverHostKey:key(7)}),{id}=decodeInvite(code);
-  const [a,b]=await Promise.allSettled([store.redeem(id,key(1)),store.redeem(id,key(2))]);
-  assert.equal(a.status,'fulfilled');assert.equal(b.status,'rejected');assert.equal(provisions,1);
-  store=new EnrollmentStore(dir,{provision});assert.deepEqual(await store.redeem(id,key(1)),a.value);assert.equal(provisions,1);
-  await assert.rejects(store.redeem(id,key(2)),/已绑定/);
+  const results=await Promise.allSettled([store.redeem(id,key(1)),store.redeem(id,key(2))]);
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(results.filter(r=>r.status==='rejected').length,1);assert.equal(provisions,1);
+  // Filesystem lock acquisition may let either caller win.
+  const winner=results.findIndex(r=>r.status==='fulfilled'),winnerKey=key(winner+1),loserKey=key(2-winner);
+  store=new EnrollmentStore(dir,{provision});assert.deepEqual(await store.redeem(id,winnerKey),results[winner].value);assert.equal(provisions,1);
+  await assert.rejects(store.redeem(id,loserKey),/已绑定/);
 });
 test('expired, revoked or unknown invitations never provision a tenant',async t=>{
   const {EnrollmentStore,decodeInvite}=await import('../lib/enrollment.mjs');const dir=await fixture(t);let now=1000,provisions=0;
