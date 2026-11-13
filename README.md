@@ -6,7 +6,7 @@
 
 ## 成员开始使用
 
-需要 Node.js 22+ 和 OpenSSH，无需 `npm install`。Windows 当前使用 WSL，尚未做 Windows 原生实测。
+需要 Node.js 20.17.0 或更新版本和 OpenSSH，无需 `npm install`。Windows 当前使用 WSL，尚未做 Windows 原生实测。
 
 ```bash
 bash ./fo join       # 首次使用：输入管理员提供的一次性邀请码

@@ -1,6 +1,6 @@
 # 首次使用 HTTP 版本
 
-1. 安装 Node.js 22+ 和 OpenSSH。macOS/Linux 直接使用，Windows 使用 WSL。
+1. 安装 Node.js 20.17.0 或更新版本和 OpenSSH。macOS/Linux 直接使用，Windows 使用 WSL。
 2. 下载仓库源代码，终端进入解压后的目录。
 3. 运行 `bash ./fo join`，粘贴管理员提供的完整一次性邀请码。
 4. 输入自己的 AutoDL 子账号（完整的 `用户名@主账户ID`）和密码，密码隐藏且不保存。

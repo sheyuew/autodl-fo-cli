@@ -4,8 +4,10 @@ if ! command -v node >/dev/null 2>&1; then
   printf '请先安装 Node.js LTS：https://nodejs.org/zh-cn/download\n安装后重新打开终端，再运行本程序。\n' >&2
   exit 1
 fi
-if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
-  printf 'Node.js 版本过旧，请安装官网 LTS 版本。\n' >&2
+fo_node=$(command -v node)
+if ! "$fo_node" -e 'const [major,minor]=process.versions.node.split(".").map(Number); process.exit(major>20 || major===20 && minor>=17 ? 0 : 1)'; then
+  fo_node_version=$("$fo_node" --version 2>/dev/null || true)
+  printf '当前 Node.js %s（%s）；需要 20.17.0 或更新版本。\n' "$fo_node_version" "$fo_node" >&2
   exit 1
 fi
 if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
@@ -13,4 +15,4 @@ if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; 
   exit 1
 fi
 fo_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec node "$fo_dir/cli.mjs" "$@"
+exec "$fo_node" "$fo_dir/cli.mjs" "$@"

@@ -6,6 +6,7 @@ test('invitation redemption generates the member key locally, pins SSH and reuse
   const dir=await mkdtemp(join(tmpdir(),'fo-join-test-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const store=new EnrollmentStore(join(dir,'server')),code=await store.issue({tenant:'alice',host:'example.test',serverHostKey:key}),invite=decodeInvite(code);
   const bin=join(dir,'bin');await mkdir(bin);const audit=join(dir,'audit.jsonl');
+  await writeFile(join(bin,'package.json'),JSON.stringify({type:'module'}));
   await writeFile(join(bin,'ssh'),`#!${process.execPath}\nimport{readFileSync,appendFileSync,writeFileSync}from'node:fs';import{execFileSync}from'node:child_process';
 const args=process.argv.slice(2);if(args.at(-1)!=='fo-enroll'||!args.includes('StrictHostKeyChecking=yes'))process.exit(2);
 const identity=args[args.indexOf('-i')+1],actual=execFileSync('ssh-keygen',['-y','-f',identity],{encoding:'utf8'}).trim().split(/\\s+/).slice(0,2).join(' ');
