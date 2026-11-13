@@ -16,3 +16,10 @@ test('remote downloads send identifiers and confirmation while leaving signed UR
  await panel.download({account:{fs_id:'d',user_info:{access_token:'must-not-send'}},file:{file_id:'f',name:'file.bin',download_url:'must-not-send'},parentFileId:'parent',remoteDirectory:'/folder',source:'resource',confirmed:true});
  assert.deepEqual(seen[1],{op:'panel-transfer',handle:'h',direction:'download',diskId:'d',source:'resource',remoteDirectory:'/folder',parentFileId:'parent',fileId:'f',fileName:'file.bin',confirmed:true});assert.ok(!JSON.stringify(seen).includes('must-not-send'));
 });
+
+
+test('remote instance management sends only explicit operations and server-issued plan identifiers',async()=>{
+ const seen=[],c=client(async q=>{seen.push(q);return q.op==='instance-prepare'?{id:'p'}:{};});
+ assert.equal(typeof c.prepareInstance,'function');await c.instanceInfo('one');await c.connection('one');await c.monitor('one');await c.images();const p=await c.prepareInstance('rename','one',{name:'new'});await c.executeInstance(p.id,{confirmed:true});
+ assert.deepEqual(seen,[{op:'instance-info',instanceUuid:'one'},{op:'instance-connection',instanceUuid:'one',includeSecrets:false,confirmed:false},{op:'instance-monitor',instanceUuid:'one'},{op:'images'},{op:'instance-prepare',instanceUuid:'one',action:'rename',args:{name:'new'}},{op:'instance-execute',planId:'p',confirmed:true}]);
+});

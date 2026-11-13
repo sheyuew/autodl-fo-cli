@@ -70,3 +70,11 @@ test('a transfer service failure or malformed success does not invite a duplicat
   malformed=true;await assert.rejects(panel.upload({account,localPath:'/root/other.bin',confirmed:true}),{code:'TRANSFER_UNCERTAIN'});
   assert.equal(requests.length,2);
 });
+
+test('explicit directory uploads and downloads use the webpage recursive-transfer payloads',async t=>{
+ const {panel,requests}=await fixture(t,(_q,r)=>reply(r,{task_id:'directory-task'}));await panel.signIn('fixture');
+ await panel.upload({account,localPath:'/root/folder',isDirectory:true,confirmed:true});
+ assert.equal(requests[0].body.is_dir,true);assert.equal(requests[0].body.src_path,'/root/folder/');
+ await panel.download({account,file:{name:'folder',file_id:'folder-id',is_dir:true},allowDirectory:true,confirmed:true});
+ assert.equal(requests[1].body.is_dir,true);assert.equal(requests[1].body.src_path,'/folder/');assert.equal(requests[1].body.file_size,0);
+});

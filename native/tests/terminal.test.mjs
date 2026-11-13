@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createServer} from 'node:http';import {once} from 'node:events';import {runTerminal} from './terminal-utils.mjs';
 
-async function fixture(t,{failOnce=false,panel=false,collision=false}={}){
+async function fixture(t,{failOnce=false,panel=false,collision=false,directory=false}={}){
   let loginCalls=0,instanceCalls=0,panelLoginCalls=0;
   const transfers=[];
   const web=createServer(async(q,r)=>{
@@ -16,7 +16,7 @@ async function fixture(t,{failOnce=false,panel=false,collision=false}={}){
         assert.equal(q.headers.authorization,'panel-inner-secret');
         const u=new URL(q.url,'http://localhost');
         if(u.pathname.endsWith('/workdir'))data='/root/autodl-tmp';
-        else if(u.pathname==='/autopanel/v1/file')data=[{filename:'fixture-local.txt',is_dir:false,size_in_byte:100},...(collision?[{filename:'fixture-cloud-child.txt',is_dir:false,size_in_byte:10}]:[])];
+        else if(u.pathname==='/autopanel/v1/file')data=[{filename:'fixture-local.txt',is_dir:false,size_in_byte:100},...(directory?[{filename:'folder',is_dir:true}]:[]),...(collision?[{filename:'fixture-cloud-child.txt',is_dir:false,size_in_byte:10}]:[])];
         else if(u.pathname.endsWith('/netdisk/list'))data=[{fs_id:'fixture-disk',type:'AutoDL_AliPan',user_info:{resource_drive_id:'resource-drive'}}];
         else if(u.pathname.endsWith('/netdisk/file')){
           assert.equal(u.searchParams.get('driver_id'),'resource-drive');
@@ -104,4 +104,17 @@ test('terminal rejects existing upload and download targets without submitting a
     {wait:'目录操作',count:2,send:'1\n'},{wait:'目录操作',count:3,send:'1\n'},
     {wait:'AutoPanel 操作',count:3,send:'q\n'},{wait:'选择操作',count:2,send:'q\n'}]},t);
   verifyPanel(result);assert.equal((result.output.match(/FILE_EXISTS/g)||[]).length,2);assert.equal(web.transfers.length,0);
+});
+
+
+test('terminal explicitly selects recursive directories and confirms both transfer directions',{timeout:20000},async t=>{
+ const web=await fixture(t,{panel:true,directory:true});
+ const result=await runTerminal({baseUrl:web.baseUrl,steps:[...panelSteps,
+ {wait:'AutoPanel 操作',send:'5\n'},{wait:'实例文件绝对路径',send:'/root/autodl-tmp/folder\n'},
+ {wait:'选择网盘编号',send:'1\n'},{wait:'选择空间',send:'1\n'},{wait:'目录操作',send:'s\n'},
+ {wait:'确认提交 [yes/no]',send:'yes\n'},
+ {wait:'AutoPanel 操作',count:2,send:'6\n'},{wait:'选择网盘编号',count:2,send:'1\n'},{wait:'选择空间',count:2,send:'1\n'},
+ {wait:'目录操作',count:2,send:'d 1\n'},{wait:'确认提交 [yes/no]',count:2,send:'yes\n'},
+ {wait:'AutoPanel 操作',count:3,send:'q\n'},{wait:'选择操作',count:2,send:'q\n'}]},t);
+ verifyPanel(result);assert.equal(web.transfers.length,2);assert.ok(web.transfers.every(x=>x.body.is_dir===true));assert.match(result.output,/递归目录/);
 });

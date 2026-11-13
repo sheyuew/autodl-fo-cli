@@ -13,6 +13,8 @@ if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
 files = [root / p for p in ('fo', 'cli.mjs', 'package.json', 'README.md',
                             'THIRD_PARTY.md', '开始使用.command')]
 files += sorted((root / 'lib').glob('*.mjs'))
+files += sorted((root / 'native').glob('*.mjs'))
+files += [root / 'native' / 'README.md', root / 'native' / 'package.json']
 files += sorted((root / 'docs').glob('*.md'))
 files += sorted((root / 'examples').glob('*.json'))
 dest = root / 'dist' / f'autodl-fo-cli-v{version}.zip'

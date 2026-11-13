@@ -3,6 +3,8 @@ import {loginSubaccount} from './login.mjs';import {WebClient} from './web-clien
 import {PanelClient} from './panel-client.mjs';
 import {RemoteClient,sshTransport} from './remote-client.mjs';import {readFile} from 'node:fs/promises';import {dirname,resolve,join} from 'node:path';import {homedir} from 'node:os';
 import {isMain} from './is-main.mjs';
+import {instanceMenu,imageMenu} from './instance-menu.mjs';
+import {watchTransfers} from './transfer-watch.mjs';
 function ask(prompt){return new Promise((resolve,reject)=>{
   const rl=readline.createInterface({input:process.stdin,output:process.stdout});let answered=false;
   rl.on('close',()=>{if(!answered)reject(Object.assign(new Error('输入已取消'),{code:'CANCELLED'}));});
@@ -17,7 +19,7 @@ function secret(prompt){
     input.on('data',onData);process.stdout.write(prompt);
   });
 }
-const recoverable=new Set(['NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','FILE_EXISTS','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN']);
+const recoverable=new Set(['NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','FILE_EXISTS','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','IMAGE_REQUIRED','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','INVALID_REQUEST','UNSUPPORTED_OPERATION','TASK_REQUIRED','INVALID_LIMIT']);
 function showError(error){
   if(!recoverable.has(error.code))throw error;
   console.error(`${error.code}：${error.message}`);
@@ -49,10 +51,14 @@ async function cloudDirectory(panel,mode='browse'){
   for(;;){
     const current=stack.at(-1),rows=await panel.cloudFiles({account,source,...current});
     console.log(`网盘目录：${current.path}`);printFiles(rows,true);
-    const hint=mode==='upload'?'输入目录编号进入 / s 上传到此目录 / u 上级 / q 返回':mode==='download'?'输入文件编号选择 / 输入目录编号进入 / u 上级 / q 返回':'输入目录编号进入 / u 上级 / q 返回';
+    const hint=mode==='upload'?'输入目录编号进入 / s 上传到此目录 / u 上级 / q 返回':mode==='download'?'输入文件编号选择 / 目录编号进入 / d 编号 下载整个目录 / u 上级 / q 返回':'输入目录编号进入 / u 上级 / q 返回';
     const choice=await ask(`目录操作 [${hint}]：`);
     if(choice==='q')return;if(choice==='u'){if(stack.length>1)stack.pop();continue;}
     if(choice==='s'&&mode==='upload')return {account,source,...current,entries:rows};
+    if(mode==='download'&&/^d\s+\d+$/.test(choice)){
+      const row=rows[Number(choice.split(/\s+/)[1])-1];if(row?.is_dir)return {account,source,...current,file:row};
+      console.log('请选择列表中的目录编号。');continue;
+    }
     const index=Number(choice)-1,row=rows[index];
     if(Number.isInteger(index)&&row&&!row.is_dir&&mode==='download')return {account,source,...current,file:row};
     if(!Number.isInteger(index)||!row?.is_dir){console.log('请选择列表中的目录编号。');continue;}
@@ -70,22 +76,51 @@ async function submitUpload(panel){
   const localPath=await ask('实例文件绝对路径：'),split=localPath.lastIndexOf('/'),name=localPath.slice(split+1);
   if(!localPath.startsWith('/')||!name)throw Object.assign(new Error('请输入实例上文件的绝对路径'),{code:'PATH_REQUIRED'});
   const file=(await panel.localFiles(localPath.slice(0,split)||'/')).find(row=>row.filename===name);
-  if(!file||file.is_dir)throw Object.assign(new Error('所选路径不是实例上的一个文件'),{code:'FILE_REQUIRED'});
+  if(!file)throw Object.assign(new Error('所选路径不是实例上的文件或目录'),{code:'FILE_REQUIRED'});
   const destination=await cloudDirectory(panel,'upload');if(!destination)return;
   if(destination.entries.some(row=>row.name===name))throw Object.assign(new Error('网盘目标已有同名条目，请更换目标或文件名'),{code:'FILE_EXISTS'});
-  console.log(`上传：实例 ${localPath} → 阿里云盘 ${destination.source==='backup'?'备份盘':'资源库'} ${destination.path.replace(/\/$/,'')}/${name}（${file.size_in_byte??'未知'} 字节）`);
+  console.log(`上传：实例 ${localPath} → 阿里云盘 ${destination.source==='backup'?'备份盘':'资源库'} ${destination.path.replace(/\/$/,'')}/${name}（${file.is_dir?'递归目录，包含子文件':`${file.size_in_byte??'未知'} 字节`}）`);
   if(!await confirmTransfer())return;
-  await panel.upload({account:destination.account,source:destination.source,remoteDirectory:destination.path,parentFileId:destination.fileId,localPath,confirmed:true});
+  await panel.upload({account:destination.account,source:destination.source,remoteDirectory:destination.path,parentFileId:destination.fileId,localPath,isDirectory:!!file.is_dir,confirmed:true});
   console.log('已提交上传任务；输入 3 或 4 查看状态。');
 }
 async function submitDownload(panel){
   const selection=await cloudDirectory(panel,'download');if(!selection)return;
   const workdir=await panel.workdir();
   if((await panel.localFiles(workdir)).some(row=>row.filename===selection.file.name))throw Object.assign(new Error('实例下载目录已有同名条目，请先移动或重命名'),{code:'FILE_EXISTS'});
-  console.log(`下载：阿里云盘 ${selection.source==='backup'?'备份盘':'资源库'} ${selection.path.replace(/\/$/,'')}/${selection.file.name} → 实例 ${workdir}/${selection.file.name}（${selection.file.size??'未知'} 字节）`);
+  console.log(`下载：阿里云盘 ${selection.source==='backup'?'备份盘':'资源库'} ${selection.path.replace(/\/$/,'')}/${selection.file.name} → 实例 ${workdir}/${selection.file.name}（${selection.file.is_dir?'递归目录，包含子文件':`${selection.file.size??'未知'} 字节`}）`);
   if(!await confirmTransfer())return;
-  await panel.download({account:selection.account,source:selection.source,remoteDirectory:selection.path,parentFileId:selection.fileId,file:selection.file,confirmed:true});
+  await panel.download({account:selection.account,source:selection.source,remoteDirectory:selection.path,parentFileId:selection.fileId,file:selection.file,allowDirectory:!!selection.file.is_dir,confirmed:true});
   console.log('已提交下载任务；输入 3 或 4 查看状态。');
+}
+async function browseLocal(panel){
+  let path=await panel.workdir();
+  for(;;){
+    console.log(`实例目录：${path}`);const rows=await panel.localFiles(path);printFiles(rows);
+    const choice=await ask('本地目录操作 [编号进入目录 / u 上级 / p 输入路径 / q 返回]：');
+    if(choice==='q')return;
+    if(choice==='p'){const next=await ask('实例目录绝对路径：');if(next.startsWith('/'))path=next;continue;}
+    if(choice==='u'){path=path.replace(/\/+$/,'').split('/').slice(0,-1).join('/')||'/';continue;}
+    const row=rows[Number(choice)-1];
+    if(!row?.is_dir||!row.filename||row.filename.includes('/')||['.','..'].includes(row.filename)){console.log('请选择目录编号。');continue;}
+    path=path.replace(/\/$/,'')+'/'+row.filename;
+  }
+}
+async function followTransfers(panel){
+  const controller=new AbortController(),stop=()=>controller.abort();process.on('SIGINT',stop);
+  console.log('跟踪当前队列，每 5 秒更新；任务结束后在终端和本地桌面提醒。Ctrl+C 返回菜单。');
+  try{
+    const result=await watchTransfers(panel,{signal:controller.signal,onUpdate:printTasks});
+    console.log(result.pending?`已停止跟踪；${result.pending} 项结果尚未确认，服务器任务继续运行。`:result.completed?`已确认 ${result.completed} 项传输结果。`:'当前没有等待或传输中的任务。');
+  }finally{process.removeListener('SIGINT',stop);}
+}
+async function cancelTransfer(panel){
+  const history=await panel.taskHistory(100),rows=[...history.task_doing,...history.task_pre];
+  if(!rows.length){console.log('当前没有可取消的传输任务。');return;}
+  console.table(rows.map((r,i)=>({编号:i+1,任务:r.task_id,文件:r.file_name,状态:r.status||'等待'})));
+  const row=rows[Number(await ask('选择取消任务编号：'))-1];if(!row)return;
+  console.log(`取消传输：${row.file_name||row.task_id}`);if(!await confirmTransfer())return;
+  await panel.cancelTask(row.task_id,{confirmed:true});console.log('已提交取消请求，请刷新传输队列。');
 }
 async function panelMenu(client){
   const rows=(await client.instances()).filter(row=>row.status==='running'&&row.has_auto_panel);
@@ -95,7 +130,7 @@ async function panelMenu(client){
   const row=rows[n-1],panel=client.openPanel?await client.openPanel(row.uuid):new PanelClient({instance:row});console.log(`已选择：${row.name||row.uuid}`);
   try{await panelLogin(panel);}catch(error){showError(error);}
   for(;;){
-    const command=await ask('AutoPanel 操作 [1 本地目录 / 2 网盘目录 / 3 传输队列 / 4 传输记录 / 5 上传 / 6 下载 / p 重新登录 / q 返回]：');
+    const command=await ask('AutoPanel 操作 [1 目录查询 / 2 网盘目录 / 3 传输队列 / 4 传输记录 / 5 上传文件或目录 / 6 下载文件或目录 / 7 跟踪并提醒 / 8 取消任务 / 9 清理成功记录 / 10 浏览实例目录 / p 重新登录 / q 返回]：');
     if(command==='q')return;
     try{
       if(command==='p')await panelLogin(panel);
@@ -111,18 +146,24 @@ async function panelMenu(client){
         console.log(`返回 ${data.task_doing.length+data.task_pre.length+data.task_done.length} 条传输记录。`);
       }else if(command==='5')await submitUpload(panel);
       else if(command==='6')await submitDownload(panel);
-      else console.log('请输入 1、2、3、4、5、6、p 或 q。');
+      else if(command==='7')await followTransfers(panel);
+      else if(command==='8')await cancelTransfer(panel);
+      else if(command==='9'){
+        console.log('清理当前 AutoPanel 已成功的传输记录；文件保留。');
+        if(await confirmTransfer()){await panel.clearCompleted({confirmed:true});console.log('已提交记录清理请求。');}
+      }else if(command==='10')await browseLocal(panel);
+      else console.log('请选择列表中的操作，或输入 p / q。');
     }catch(error){showError(error);if(error.code==='PANEL_ACCESS_DENIED')return;}
   }
 }
 export async function run({remoteConfigPath}={}){
   if(!remoteConfigPath&&process.argv[2]==='--remote'&&process.argv.length<=4)remoteConfigPath=process.argv[3]||process.env.FO_CONFIG||join(homedir(),'.config','autodl-fo-cli','config.json');
   if(!remoteConfigPath&&process.argv.length>2){
-    if(process.argv[2]==='--help'&&process.argv.length===3){console.log('用法：node cli.mjs 或 node cli.mjs --remote [连接配置.json]\n在终端输入子账号和密码，读取实例与库存，操作 AutoPanel 目录、传输状态及阿里云盘文件上传下载。传输需确认 yes/no，不保存密码或会话。');return;}
+    if(process.argv[2]==='--help'&&process.argv.length===3){console.log('用法：node cli.mjs 或 node cli.mjs --remote [连接配置.json]\n在终端输入子账号和密码，管理实例、镜像和库存，操作 AutoPanel 目录、网盘传输与完成提醒。执行操作前确认 yes/no，不保存密码或会话。');return;}
     throw Object.assign(new Error('验证版不接收命令行参数；请直接运行 node cli.mjs'),{code:'USAGE'});
   }
   if(!process.stdin.isTTY)throw Object.assign(new Error('请在交互式终端运行 node cli.mjs'),{code:'TTY_REQUIRED'});
-  console.log('AutoDL 子账号 HTTP 验证版 · 网盘传输需确认');
+  console.log('AutoDL 子账号 HTTP 终端 · 执行操作前确认 yes/no');
   let client;
   if(remoteConfigPath){
     const path=resolve(remoteConfigPath),config=JSON.parse(await readFile(path,'utf8'));
@@ -135,7 +176,7 @@ export async function run({remoteConfigPath}={}){
   }
   console.log(`当前账号：${client.identity.username}。${remoteConfigPath?'会话仅在服务器内存中，服务重启后需重新登录。':'关闭程序后会话不保留。'}`);
   for(;;){
-    const command=await ask('选择操作 [1 实例 / 2 地区库存 / 3 GPU 型号 / 4 AutoPanel / q 退出]：');
+    const command=await ask('选择操作 [1 实例列表 / 2 地区库存 / 3 GPU 型号 / 4 AutoPanel / 5 实例管理 / 6 我的镜像 / q 退出]：');
     if(command==='q')return;
     try{
     if(command==='1'){
@@ -150,7 +191,9 @@ export async function run({remoteConfigPath}={}){
     }else if(command==='3'){
       console.table((await client.gpuTypes()).filter(x=>x.chip_corp!=='cpu').map(x=>({型号:x.gpu_name,架构:x.cpu_arch||'—'})));
     }else if(command==='4')await panelMenu(client);
-    else console.log('请输入 1、2、3、4 或 q。');
+    else if(command==='5')await instanceMenu(client,{ask,confirm:confirmTransfer,showError});
+    else if(command==='6')await imageMenu(client,{ask,confirm:confirmTransfer,showError});
+    else console.log('请输入 1、2、3、4、5、6 或 q。');
     }catch(error){
       showError(error);
     }

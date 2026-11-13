@@ -1,3 +1,4 @@
+import {InstanceManager} from './instance-management.mjs';
 const origin='https://www.autodl.com';
 const endpoints=Object.freeze({
   instances:{path:'/api/v1/instance',method:'POST'},
@@ -6,12 +7,14 @@ const endpoints=Object.freeze({
   regionalGpus:{path:'/api/v1/machine/region/gpu_type',method:'POST'},
   machines:{path:'/api/v1/user/machine/list',method:'POST'},
   instanceSnapshot:{path:'/api/v1/instance/snapshot',method:'GET',query:['instance_uuid']},
+  instanceMonitor:{path:'/api/v1/instance/monitor',method:'GET',query:['instance_uuid']},
+  privateImages:{path:'/api/v1/image/private/list',method:'POST'},
 });
 function failure(code,message,details={}){return Object.assign(new Error(message),{code,...details});}
 
-/** Read-only web-session backend. No credentials or sessions are written to disk. */
+/** Web-session backend. Credentials, sessions and confirmation plans stay in memory. */
 export class WebClient{
-  #session;#expired=false;#baseUrl;#timeoutMs;
+  #session;#expired=false;#baseUrl;#timeoutMs;#manager;
   constructor({session,expectedUsername,baseUrl=origin,timeoutMs=15000}){
     const user=session?.user,username=user?.sub_name||user?.username||user?.phone;
     if(!session?.token||!(user?.uuid||user?.id)||!username)throw failure('LOGIN_REQUIRED','缺少已验证的 AutoDL 登录会话');
@@ -20,14 +23,18 @@ export class WebClient{
     if(u.origin!==origin&&!(u.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(u.hostname)))throw failure('INVALID_ORIGIN','只允许 AutoDL 官方域名或本地测试服务');
     this.#session=structuredClone(session);this.#baseUrl=u.origin;this.#timeoutMs=timeoutMs;
     this.identity=Object.freeze({id:String(user.uuid||user.id),username,subaccount:!!user.sub_name});
+    this.#manager=new InstanceManager({instances:()=>this.instances(),snapshot:id=>this.snapshot(id),read:(op,args)=>this.read(op,args),pages:(op,args)=>this.#pages(op,args),request:(endpoint,body)=>this.#request(endpoint,body)});
   }
   async read(operation,body){
     if(!Object.hasOwn(endpoints,operation))throw failure('READ_ONLY','验证版只允许读取实例和库存');
+    return this.#request(endpoints[operation],body);
+  }
+  async #request(endpoint,body){
     if(this.#expired)throw failure('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');
-    const endpoint=endpoints[operation],path=this.identity.subaccount?endpoint.path.replace('/api/v1/','/api/v1/sub_user/'):endpoint.path;
+    const path=this.identity.subaccount?endpoint.path.replace('/api/v1/','/api/v1/sub_user/'):endpoint.path;
     const url=new URL(this.#baseUrl+path);for(const key of endpoint.query||[])if(body?.[key]!=null)url.searchParams.set(key,String(body[key]));
     let response;const signal=AbortSignal.timeout(this.#timeoutMs);
-    try{response=await fetch(url,{method:endpoint.method,redirect:'error',headers:{Authorization:this.#session.token,AppVersion:this.#session.appVersion||'0.0.0','Content-Type':'application/json',Accept:'application/json','User-Agent':'autodl-subaccount-poc'},...(endpoint.method==='POST'?{body:JSON.stringify(body||{})}:{}),signal});}
+    try{response=await fetch(url,{method:endpoint.method,redirect:'error',headers:{Authorization:this.#session.token,AppVersion:this.#session.appVersion||'0.0.0','Content-Type':'application/json',Accept:'application/json','User-Agent':'autodl-http-cli'},...(endpoint.method!=='GET'?{body:JSON.stringify(body||{})}:{}),signal});}
     catch{throw failure('NETWORK','AutoDL 请求失败或超时',{retryable:true});}
     if(!response.ok){
       try{await response.body?.cancel();}catch{}
@@ -48,7 +55,7 @@ export class WebClient{
     if(['AuthorizeFailed','Unauthorized','TokenExpired','TokenInvalid'].includes(envelope.code)){
       this.#expired=true;throw failure('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');
     }
-    if(envelope.code!=='Success')throw failure('API_ERROR','AutoDL 拒绝了读取请求',{providerCode:envelope.code.slice(0,80)});
+    if(envelope.code!=='Success')throw failure('API_ERROR',`AutoDL 拒绝了请求（${envelope.code.slice(0,80)}）`,{providerCode:envelope.code.slice(0,80)});
     return envelope.data;
   }
   async #pages(operation,body){
@@ -63,6 +70,14 @@ export class WebClient{
   }
   instances(){return this.#pages('instances',{status:[],charge_type:[],name:'',sub_name:''});}
   snapshot(uuid){if(typeof uuid!=='string'||!uuid.trim())throw failure('INSTANCE_REQUIRED','请先选择实例');return this.read('instanceSnapshot',{instance_uuid:uuid});}
+  instanceInfo(uuid){return this.#manager.info(uuid);}
+  connection(uuid,options){return this.#manager.connection(uuid,options);}
+  monitor(uuid){return this.#manager.monitor(uuid);}
+  images(){return this.#manager.images();}
+  prepareImage(action,uuid,args){return this.#manager.prepareImage(action,uuid,args);}
+  executeImage(id,options){return this.#manager.executeImage(id,options);}
+  prepareInstance(action,uuid,args){return this.#manager.prepare(action,uuid,args);}
+  executeInstance(id,options){return this.#manager.execute(id,options);}
   regions(){return this.read('regions');}
   gpuTypes(){return this.read('gpuTypes');}
   regionalGpus(regionSigns){return this.read('regionalGpus',{region_sign_list:regionSigns});}

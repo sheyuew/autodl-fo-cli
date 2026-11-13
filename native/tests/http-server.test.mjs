@@ -3,10 +3,13 @@ import {createServer as httpServer} from 'node:http';import {createConnection} f
 import {once} from 'node:events';import {mkdtemp,readFile,readdir,mkdir,writeFile} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 const loaded=await import('../http-server.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 async function api(t,{emptyUuid=false}={}){
- const requests=[];const server=httpServer(async(q,r)=>{let raw='';for await(const p of q)raw+=p;const b=raw?JSON.parse(raw):{};requests.push({path:q.url,body:b});let data,code='Success';
+ const requests=[];const server=httpServer(async(q,r)=>{let raw='';for await(const p of q)raw+=p;const b=raw?JSON.parse(raw):{};requests.push({path:q.url,method:q.method,body:b});let data,code='Success';
  if(q.url.endsWith('/sub_user/login'))data={ticket:b.sub_name,user:{id:123,uuid:emptyUuid?'':'user-'+b.sub_name,sub_name:b.sub_name}};
  else if(q.url.endsWith('/sub_user/passport'))data={token:'web-token-'+b.ticket};
  else if(q.url==='/api/v1/sub_user/instance')data={list:[{uuid:'instance-a',name:'fixture-instance',status:'running',has_auto_panel:true,jupyter_token:'outer-private',proxy_host:'127.0.0.1',jupyter_port:server.address().port,root_password:'root-private',req_gpu_amount:1}],result_total:1};
+ else if(q.url==='/api/v1/sub_user/image/private/list')data={list:[{id:42,image_uuid:'image-a',name:'saved',status:'success'}],result_total:1};
+ else if(q.url==='/api/v1/sub_user/image/private/update'){data=null;}
+ else if(q.url==='/api/v1/sub_user/instance/name'){assert.equal(q.method,'PUT');data=null;}
  else if(q.url==='/api/v1/sub_user/region/list')data=[{visible:'all',used_for:'all',region_name:'Region',region_sign:'region-a'}];
  else if(q.url.startsWith('/autopanel/v1/')){
   code='success';assert.equal(q.headers.autodlautopaneltoken,'outer-private');
@@ -15,7 +18,9 @@ async function api(t,{emptyUuid=false}={}){
    if(q.url.endsWith('/netdisk/list'))data=[{fs_id:'disk-a',type:'AutoDL_AliPan',refresh_token:'cloud-private',user_info:{resource_drive_id:'drive-a',access_token:'cloud-access-private'}}];
    else if(q.url.startsWith('/autopanel/v1/netdisk/file'))data={list:{List:[{name:'file.bin',file_id:'file-id',size:10,is_dir:false,download_url:'https://fixture.invalid/signed-private'}]},next_marker:''};
    else if(q.url.endsWith('/netdisk/download')){assert.equal(b.download_url,'https://fixture.invalid/signed-private');data={task_id:'task-a'};}
-   else if(q.url.startsWith('/autopanel/v1/netdisk/task'))data={task_pre:[],task_doing:[],task_done:[{file_name:'file.bin',status:'success',download_url:'signed-private',task_type:2}],task_success:1,task_total:1};
+   else if(q.url.startsWith('/autopanel/v1/netdisk/task')&&q.method==='DELETE'){assert.equal(new URL(q.url,'http://fixture').searchParams.get('task_id'),'queued-a');data=null;}
+   else if(q.url.endsWith('/netdisk/task/clear'))data=null;
+   else if(q.url.startsWith('/autopanel/v1/netdisk/task'))data={task_pre:[{task_id:'queued-a',file_name:'queued.bin'}],task_doing:[],task_done:[{file_name:'file.bin',status:'success',download_url:'signed-private',task_type:2}],task_success:1,task_total:1};
    else if(q.url.endsWith('/workdir'))data='/root/autodl-tmp';
    else if(q.url.startsWith('/autopanel/v1/file'))data=[];
    else assert.fail('unexpected panel request');
@@ -91,4 +96,30 @@ test('a verified subaccount with an empty UUID retains the legacy parent-and-log
  assert.equal(reply.ok,true,reply.error);assert.equal(reply.result.account,'team:alice@team');
  assert.equal((await result(s.socket,{op:'status'})).account,'team:alice@team');
  assert.equal(JSON.parse(await readFile(join(state,'account-binding.json'),'utf8')).boundAt,'fixture');
+});
+
+
+test('instance confirmation plans stay within a tenant and only execute once after explicit confirmation',async t=>{
+ const web=await api(t),a=await service(t,web.baseUrl),b=await service(t,web.baseUrl,'bob');await result(a.socket,login);await result(b.socket,{...login,username:'bob@team'});
+ const p=await result(a.socket,{op:'instance-prepare',action:'rename',instanceUuid:'instance-a',args:{name:'new'}});
+ assert.equal(web.requests.filter(r=>r.path.endsWith('/instance/name')).length,0);
+ assert.equal((await rpc(b.socket,{op:'instance-execute',planId:p.id,confirmed:true})).code,'PLAN_EXPIRED');
+ assert.equal((await rpc(a.socket,{op:'instance-execute',planId:p.id})).code,'CONFIRMATION_REQUIRED');
+ assert.equal((await result(a.socket,{op:'instance-execute',planId:p.id,confirmed:true})).accepted,true);
+ assert.equal((await rpc(a.socket,{op:'instance-execute',planId:p.id,confirmed:true})).code,'PLAN_EXPIRED');
+ assert.equal(web.requests.filter(r=>r.path.endsWith('/instance/name')).length,1);
+});
+
+
+test('image plans and task controls are available over the real socket and require their own confirmations',async t=>{
+ const web=await api(t),s=await service(t,web.baseUrl);await result(s.socket,login);
+ const images=await result(s.socket,{op:'images'});assert.equal(images[0].image_uuid,'image-a');
+ const plan=await result(s.socket,{op:'image-prepare',action:'rename',imageUuid:'image-a',args:{name:'new'}});
+ assert.equal((await rpc(s.socket,{op:'image-execute',planId:plan.id})).code,'CONFIRMATION_REQUIRED');await result(s.socket,{op:'image-execute',planId:plan.id,confirmed:true});
+ assert.equal((await rpc(s.socket,{op:'image-prepare',action:'delete',imageUuid:'not-mine'})).code,'IMAGE_REQUIRED');
+ const handle=await openPanel(s.socket);
+ assert.equal((await rpc(s.socket,{op:'panel-task',handle,action:'cancel',taskId:'queued-a'})).code,'CONFIRMATION_REQUIRED');
+ await result(s.socket,{op:'panel-task',handle,action:'cancel',taskId:'queued-a',confirmed:true});
+ assert.equal((await rpc(s.socket,{op:'panel-task',handle,action:'clear'})).code,'CONFIRMATION_REQUIRED');await result(s.socket,{op:'panel-task',handle,action:'clear',confirmed:true});
+ assert.equal(web.requests.filter(x=>x.method==='DELETE'&&x.path.includes('/task?')).length,1);assert.equal(web.requests.filter(x=>x.path.endsWith('/task/clear')).length,1);
 });

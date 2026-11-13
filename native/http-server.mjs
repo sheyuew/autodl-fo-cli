@@ -19,7 +19,7 @@ class HttpRuntime{
   async account(panel,id){const account=(await panel.accounts()).find(a=>a.fs_id===id);if(!account)throw fail('DISK_REQUIRED','网盘不属于当前实例或尚未授权');return account;}
   async dispatch(q){
     if(!q||typeof q!=='object'||Array.isArray(q)||['tenant','socket','account'].some(k=>Object.hasOwn(q,k)))throw fail('INVALID_REQUEST','不能通过请求切换服务器账号');
-    if(q.op==='doctor')return {tenant:this.tenantId,backend:'native-http',transport:'SSH + private Unix socket + AutoDL HTTP',authenticated:!!this.#client,identity:this.#client?.identity||null,fo:false,capabilities:['instances','stock','autopanel','ali-file-transfer'],taskEngine:false};
+    if(q.op==='doctor')return {tenant:this.tenantId,backend:'native-http',transport:'SSH + private Unix socket + AutoDL HTTP',authenticated:!!this.#client,identity:this.#client?.identity||null,fo:false,capabilities:['instances','stock','instance-management','images','autopanel','ali-file-transfer','directory-transfer','transfer-control'],taskEngine:false};
     if(q.op==='notifications'){
       const data=await readJSON(join(this.state,'notifications.json'),{events:[],nextSeq:1});const after=q.after??0;
       if(!Number.isSafeInteger(after)||after<0)throw fail('INVALID_REQUEST','通知游标无效');return {tenant:this.tenantId,events:(data.events||[]).filter(e=>e.seq>after),cursor:(data.nextSeq||1)-1,truncated:false,error:null};
@@ -48,6 +48,14 @@ class HttpRuntime{
     if(q.op==='regions')return client.regions();
     if(q.op==='gpu-types')return (await client.gpuTypes()).map(r=>pick(r,['gpu_name','chip_corp','cpu_arch']));
     if(q.op==='machines')return (await client.machines(q.args||{})).map(r=>pick(r,['gpu_name','region_sign','gpu_idle_num','gpu_num','driver_version']));
+    if(q.op==='instance-info')return client.instanceInfo(q.instanceUuid);
+    if(q.op==='instance-connection')return client.connection(q.instanceUuid,{includeSecrets:q.includeSecrets===true,confirmed:q.confirmed===true});
+    if(q.op==='instance-monitor')return client.monitor(q.instanceUuid);
+    if(q.op==='images')return client.images();
+    if(q.op==='image-prepare')return client.prepareImage(q.action,q.imageUuid,q.args);
+    if(q.op==='image-execute')return client.executeImage(q.planId,{confirmed:q.confirmed===true});
+    if(q.op==='instance-prepare')return client.prepareInstance(q.action,q.instanceUuid,q.args);
+    if(q.op==='instance-execute')return client.executeInstance(q.planId,{confirmed:q.confirmed===true});
     if(q.op==='panel-open'){
       const row=(await client.instances()).find(r=>r.uuid===q.instanceUuid);if(!row)throw fail('INSTANCE_REQUIRED','实例不属于当前账号');
       if(this.#panels.size>=20)this.#panels.delete(this.#panels.keys().next().value);
@@ -60,25 +68,30 @@ class HttpRuntime{
       if(q.query==='localFiles')return (await panel.localFiles(q.path)).map(r=>pick(r,['filename','is_dir','size_in_byte','updated_at']));
       if(q.query==='accounts')return (await panel.accounts()).map(r=>pick(r,['fs_id','type']));
       if(q.query==='activeTasks')return safeTasks(await panel.activeTasks());
-      if(q.query==='taskHistory')return safeTasks(await panel.taskHistory());
+      if(q.query==='taskHistory')return safeTasks(await panel.taskHistory(q.limit??10));
       throw fail('READ_ONLY','不支持此 AutoPanel 读取操作');
+    }
+    if(q.op==='panel-task'){
+      if(q.action==='cancel')return panel.cancelTask(q.taskId,{confirmed:q.confirmed===true});
+      if(q.action==='clear')return panel.clearCompleted({confirmed:q.confirmed===true});
+      throw fail('UNSUPPORTED_OPERATION','不支持此传输任务操作');
     }
     if(q.op==='panel-cloud')return (await panel.cloudFiles({account:await this.account(panel,q.diskId),...pick(q.args,['path','source','fileId'])})).map(r=>pick(r,fileKeys));
     if(q.op==='panel-transfer'){
       if(q.confirmed!==true)throw fail('CONFIRMATION_REQUIRED','请先核对传输路径并确认 yes/no');
       const account=await this.account(panel,q.diskId),source=q.source||'resource',remoteDirectory=q.remoteDirectory||'/';
-      if(q.direction==='upload')return panel.upload({account,source,remoteDirectory,parentFileId:q.parentFileId,localPath:q.localPath,confirmed:true});
+      if(q.direction==='upload')return panel.upload({account,source,remoteDirectory,parentFileId:q.parentFileId,localPath:q.localPath,isDirectory:q.isDirectory===true,confirmed:true});
       if(q.direction==='download'){
         const file=(await panel.cloudFiles({account,source,path:remoteDirectory,fileId:q.parentFileId})).find(f=>f.file_id===q.fileId&&f.name===q.fileName);
-        if(!file)throw fail('FILE_REQUIRED','网盘文件已变化，请重新选择');return panel.download({account,source,remoteDirectory,file,confirmed:true});
+        if(!file)throw fail('FILE_REQUIRED','网盘文件已变化，请重新选择');return panel.download({account,source,remoteDirectory,file,allowDirectory:q.allowDirectory===true,confirmed:true});
       }
       throw fail('INVALID_REQUEST','请选择上传或下载');
     }
     throw fail('UNSUPPORTED_OPERATION','不支持的 HTTP 操作');
   }
 }
-const operations=new Set(['doctor','status','notifications','login-password','instances','regions','gpu-types','machines','catalog','panel-open','panel-login','panel-read','panel-cloud','panel-transfer']);
-const publicCodes=new Set(['LOGIN_REQUIRED','ACCOUNT_MISMATCH','CREDENTIALS_REQUIRED','LOGIN_REJECTED','NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_REQUIRED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','INVALID_REQUEST','READ_ONLY','UNSUPPORTED_OPERATION']);
+const operations=new Set(['doctor','status','notifications','login-password','instances','regions','gpu-types','machines','catalog','instance-info','instance-connection','instance-monitor','images','image-prepare','image-execute','instance-prepare','instance-execute','panel-open','panel-login','panel-read','panel-cloud','panel-transfer','panel-task']);
+const publicCodes=new Set(['LOGIN_REQUIRED','ACCOUNT_MISMATCH','CREDENTIALS_REQUIRED','LOGIN_REJECTED','NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_REQUIRED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','INVALID_REQUEST','READ_ONLY','UNSUPPORTED_OPERATION','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','TASK_REQUIRED','INVALID_LIMIT','IMAGE_REQUIRED']);
 
 export async function startHttpServer({state,socket,tenantId='owner',baseUrl='https://www.autodl.com',logger=console.log}){
   await mkdir(state,{recursive:true,mode:0o700});const runtime=new HttpRuntime({state,tenantId,baseUrl});

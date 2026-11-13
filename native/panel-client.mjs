@@ -35,7 +35,7 @@ export class PanelClient{
     const url=new URL('/autopanel/v1'+endpoint.path,this.#origin);
     for(const key of endpoint.query||[])if(params?.[key]!=null)url.searchParams.set(key,String(params[key]));
     const signal=AbortSignal.timeout(this.#timeoutMs);let response;
-    try{response=await fetch(url,{method:body?'POST':'GET',redirect:'error',signal,headers:{Accept:'application/json',AutodlAutoPanelToken:this.#accessToken,...(this.#token?{Authorization:this.#token}:{}),...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});}
+    try{response=await fetch(url,{method:endpoint.method||(body?'POST':'GET'),redirect:'error',signal,headers:{Accept:'application/json',AutodlAutoPanelToken:this.#accessToken,...(this.#token?{Authorization:this.#token}:{}),...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});}
     catch{throw failure('NETWORK','AutoPanel 请求失败或超时',{retryable:true});}
     if(!response.ok){
       try{await response.body?.cancel();}catch{}
@@ -108,6 +108,25 @@ export class PanelClient{
     const data=await this.read('taskHistory',{limit});
     if(!Array.isArray(data?.task_pre)||!Array.isArray(data?.task_doing)||!Array.isArray(data?.task_done))throw failure('SCHEMA_CHANGED','AutoPanel 传输记录结构发生变化');return data;
   }
+  async #taskMutation(endpoint,options){
+    try{await this.#request(endpoint,options);}
+    catch(error){if(['NETWORK','SCHEMA_CHANGED'].includes(error.code)||error.retryable&&error.code==='API_ERROR')throw failure('ACTION_UNCERTAIN','操作结果未知，请先查看传输记录，避免重复提交',{retryable:false});throw error;}
+    return {accepted:true};
+  }
+  #confirmTask(confirmed){
+    if(confirmed!==true)throw failure('CONFIRMATION_REQUIRED','请先核对任务操作并确认 yes/no');
+    if(!this.#token)throw failure('PANEL_LOGIN_REQUIRED','请先输入 AutoPanel 独立访问密码');
+  }
+  async cancelTask(taskId,{confirmed=false}={}){
+    this.#confirmTask(confirmed);
+    if(!['string','number'].includes(typeof taskId)||!String(taskId)||String(taskId).length>200)throw failure('TASK_REQUIRED','请选择当前实例的传输任务');
+    const data=await this.taskHistory(100),task=[...data.task_pre,...data.task_doing].find(t=>String(t.task_id)===String(taskId));
+    if(!task)throw failure('TASK_REQUIRED','任务已结束或不属于当前实例，请刷新队列');
+    return this.#taskMutation({path:'/netdisk/task',method:'DELETE',query:['task_id']},{params:{task_id:task.task_id}});
+  }
+  async clearCompleted({confirmed=false}={}){
+    this.#confirmTask(confirmed);return this.#taskMutation({path:'/netdisk/task/clear',method:'GET'});
+  }
   #transferDrive(account,source,confirmed){
     if(confirmed!==true)throw failure('CONFIRMATION_REQUIRED','请核对传输方向和路径后确认提交');
     if(!this.#token)throw failure('PANEL_LOGIN_REQUIRED','请先输入 AutoPanel 独立访问密码');
@@ -127,16 +146,16 @@ export class PanelClient{
     const id=typeof data==='string'?data:data?.task_id;
     return {accepted:true,...(typeof id==='string'&&id?{taskId:id}:{})};
   }
-  async upload({account,localPath,remoteDirectory='/',parentFileId,source='resource',confirmed=false}){
+  async upload({account,localPath,remoteDirectory='/',parentFileId,source='resource',confirmed=false,isDirectory=false}){
     const drive=this.#transferDrive(account,source,confirmed);
     if(typeof localPath!=='string'||!localPath.startsWith('/')||localPath.endsWith('/')||localPath.includes('\0')||localPath.split('/').some(p=>p==='.'||p==='..'))throw failure('PATH_REQUIRED','请输入实例上文件的绝对路径');
     const destination=directory(remoteDirectory);
     if(destination!=='/'&&!parentFileId)throw failure('PATH_REQUIRED','上传到子目录需要所选目录的文件 ID');
-    return this.#submitTransfer('/netdisk/upload',{dst_path:destination,fsid:account.fs_id,src_path:localPath,file_id:parentFileId||'/',is_dir:false,drive_id:drive});
+    return this.#submitTransfer('/netdisk/upload',{dst_path:destination,fsid:account.fs_id,src_path:localPath+(isDirectory===true?'/':''),file_id:parentFileId||'/',is_dir:isDirectory===true,drive_id:drive});
   }
-  async download({account,file,remoteDirectory='/',source='resource',confirmed=false}){
+  async download({account,file,remoteDirectory='/',source='resource',confirmed=false,allowDirectory=false}){
     const drive=this.#transferDrive(account,source,confirmed);
-    if(file?.is_dir||typeof file?.name!=='string'||!file.name||['.','..'].includes(file.name)||file.name.includes('/')||file.name.includes('\0')||!file.file_id||!Number.isFinite(file.size)||file.size<0)throw failure('FILE_REQUIRED','请选择网盘中的一个文件');
-    return this.#submitTransfer('/netdisk/download',{dst_path:'',fsid:account.fs_id,src_path:directory(remoteDirectory)+file.name,file_id:file.file_id,is_dir:false,download_url:file.download_url||'',file_size:file.size,drive_id:drive});
+    if((file?.is_dir&&allowDirectory!==true)||typeof file?.name!=='string'||!file.name||['.','..'].includes(file.name)||file.name.includes('/')||file.name.includes('\0')||!file.file_id||(!file.is_dir&&(!Number.isFinite(file.size)||file.size<0)))throw failure('FILE_REQUIRED','请选择网盘文件或明确选择目录传输');
+    return this.#submitTransfer('/netdisk/download',{dst_path:'',fsid:account.fs_id,src_path:directory(remoteDirectory)+file.name+(file.is_dir?'/':''),file_id:file.file_id,is_dir:!!file.is_dir,download_url:file.download_url||'',file_size:file.is_dir?0:file.size,drive_id:drive});
   }
 }
