@@ -1,10 +1,11 @@
+import {printQuote} from './provision-menu.mjs';
 export async function instanceMenu(client,{ask,confirm,showError}){
  const rows=await client.instances();if(!rows.length){console.log('当前账号没有实例。');return;}
  console.table(rows.map((r,i)=>({编号:i+1,名称:r.name||r.uuid,状态:r.status,GPU:r.snapshot_gpu_alias_name||r.gpu_name||'—',数量:r.req_gpu_amount??'—'})));
  const index=Number(await ask('选择管理实例编号（q 返回）：'))-1,row=rows[index];if(!Number.isInteger(index)||!row)return;
  const uuid=row.uuid;console.log(`管理实例：${row.name||uuid} (${uuid})`);
  for(;;){
-  const choice=await ask('实例操作 [1 详情 / 2 连接信息 / 3 监控 / 4 开机 / 5 关机 / 6 重启 / 7 定时关机 / 8 取消定时 / 9 重命名 / 10 保存镜像 / 11 释放 / q 返回]：');
+  const choice=await ask('实例操作 [1 详情 / 2 连接信息 / 3 监控 / 4 开机 / 5 关机 / 6 重启 / 7 定时关机 / 8 取消定时 / 9 重命名 / 10 保存镜像 / 11 释放 / 12 扩容数据盘 / q 返回]：');
   if(choice==='q')return;
   try{
    if(choice==='1'){console.dir(await client.instanceInfo(uuid),{depth:5});continue;}
@@ -14,20 +15,19 @@ export async function instanceMenu(client,{ask,confirm,showError}){
     continue;
    }
    if(choice==='3'){console.dir(await client.monitor(uuid),{depth:6});continue;}
-   const actions={'4':'powerOn','5':'powerOff','6':'restart','7':'timedShutdown','8':'cancelShutdown','9':'rename','10':'saveImage','11':'release'},action=actions[choice];
+   const actions={'4':'powerOn','5':'powerOff','6':'restart','7':'timedShutdown','8':'cancelShutdown','9':'rename','10':'saveImage','11':'release','12':'expandDataDisk'},action=actions[choice];
    if(!action){console.log('请选择列表中的操作。');continue;}
    const args={};if(action==='rename')args.name=await ask('实例新名称：');
    if(action==='saveImage')args.name=await ask('系统盘镜像名称：');
    if(action==='timedShutdown')args.shutdownAt=await ask('关机时间（北京时间 YYYY-MM-DD HH:mm）：');
+   if(action==='expandDataDisk'){const value=await ask('扩容后额外付费数据盘总容量 GB（不是新增量，q 返回）：');if(value==='q')continue;args.sizeGB=value===''?NaN:Number(value);}
    const plan=await client.prepareInstance(action,uuid,args);
    console.log(`${plan.label}：${plan.name} (${plan.instanceUuid})；当前状态 ${plan.status}`);
    if(plan.body.instance_name)console.log(`新名称：${plan.body.instance_name}`);
    if(plan.body.image_name)console.log(`镜像名称：${plan.body.image_name}`);
    if(plan.body.shutdown_at)console.log(`关机时间：${plan.body.shutdown_at}（北京时间）`);
-   if(plan.quote){
-    const q=plan.quote;console.log(`计算费用：¥${q.computeHourly.toFixed(3)}/小时；存储费用：¥${q.storageDaily.toFixed(3)}/天${q.storagePrepaid?'（已预付的存储按现有套餐）':''}`);
-    console.log(`运行总计折合：¥${q.totalHourly.toFixed(3)}/小时。存储按平台原计费周期结算，关机后仍可能收费。`);
-   }
+   if(plan.diskChange){const d=plan.diskChange;console.log(`数据盘总容量：${d.currentTotalGB} → ${d.targetTotalGB} GB；基础免费 ${d.baseGB} GB；付费扩容容量：${d.currentExpansionGB} → ${d.targetExpansionGB} GB；本次新增 ${d.increaseGB} GB。`);}
+   if(plan.quote)printQuote(plan.quote);
    if(plan.warning)console.log(plan.warning);
    if(!await confirm())continue;
    await client.executeInstance(plan.id,{confirmed:true});console.log(`${plan.label}请求已提交；实际结果请通过详情、监控或镜像列表确认。`);

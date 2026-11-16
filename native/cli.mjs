@@ -4,6 +4,7 @@ import {PanelClient} from './panel-client.mjs';
 import {RemoteClient,sshTransport} from './remote-client.mjs';import {readFile} from 'node:fs/promises';import {dirname,resolve,join} from 'node:path';import {homedir} from 'node:os';
 import {isMain} from './is-main.mjs';
 import {instanceMenu,imageMenu} from './instance-menu.mjs';
+import {provisionMenu,resourceMenu} from './provision-menu.mjs';
 import {watchTransfers} from './transfer-watch.mjs';
 export function ask(prompt){return new Promise((resolve,reject)=>{
   const rl=readline.createInterface({input:process.stdin,output:process.stdout});let answered=false;
@@ -19,7 +20,7 @@ export function secret(prompt){
     input.on('data',onData);process.stdout.write(prompt);
   });
 }
-const recoverable=new Set(['NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','FILE_EXISTS','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','IMAGE_REQUIRED','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','INVALID_REQUEST','UNSUPPORTED_OPERATION','TASK_REQUIRED','INVALID_LIMIT']);
+const recoverable=new Set(['NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','DISK_SIZE_REQUIRED','DISK_LIMIT','PATH_REQUIRED','FILE_REQUIRED','FILE_EXISTS','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','IMAGE_REQUIRED','IMAGE_INCOMPATIBLE','NO_STOCK','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','INVALID_REQUEST','UNSUPPORTED_OPERATION','TASK_REQUIRED','TASK_CONFLICT','INVALID_LIMIT','SESSION_ENDED','STATE_INVALID']);
 function showError(error){
   if(!recoverable.has(error.code))throw error;
   console.error(`${error.code}：${error.message}`);
@@ -159,7 +160,7 @@ async function panelMenu(client){
 export async function run({remoteConfigPath,client:initialClient,sessionDescription}={}){
   if(!initialClient&&!remoteConfigPath&&process.argv[2]==='--remote'&&process.argv.length<=4)remoteConfigPath=process.argv[3]||process.env.FO_CONFIG||join(homedir(),'.config','autodl-fo-cli','config.json');
   if(!initialClient&&!remoteConfigPath&&process.argv.length>2){
-    if(process.argv[2]==='--help'&&process.argv.length===3){console.log('用法：node cli.mjs 或 node cli.mjs --remote [连接配置.json]\n在终端输入子账号和密码，管理实例、镜像和库存，操作 AutoPanel 目录、网盘传输与完成提醒。执行操作前确认 yes/no，不保存密码或会话。');return;}
+    if(process.argv[2]==='--help'&&process.argv.length===3){console.log('用法：node cli.mjs 或 node cli.mjs --remote [连接配置.json]\n在终端输入子账号和密码，管理实例、镜像和库存，新建或克隆普通按量实例，操作 AutoPanel 网盘传输与完成提醒。默认本地 bash ./fo 还支持后台抢卡。执行操作前确认 yes/no，不保存密码。');return;}
     throw Object.assign(new Error('验证版不接收命令行参数；请直接运行 node cli.mjs'),{code:'USAGE'});
   }
   if(!process.stdin.isTTY)throw Object.assign(new Error('请在交互式终端运行 node cli.mjs'),{code:'TTY_REQUIRED'});
@@ -176,7 +177,7 @@ export async function run({remoteConfigPath,client:initialClient,sessionDescript
   }
   console.log(`当前账号：${client.identity.username}。${sessionDescription||(remoteConfigPath?'会话仅在服务器内存中，服务重启后需重新登录。':'关闭程序后会话不保留。')}`);
   for(;;){
-    const command=await ask('选择操作 [1 实例列表 / 2 地区库存 / 3 GPU 型号 / 4 AutoPanel / 5 实例管理 / 6 我的镜像 / q 退出]：');
+    const command=await ask('选择操作 [1 实例列表 / 2 地区库存 / 3 GPU 型号 / 4 AutoPanel / 5 实例管理 / 6 我的镜像 / 7 新建或克隆 / 8 自动抢卡 / q 退出]：');
     if(command==='q')return;
     try{
     if(command==='1'){
@@ -193,7 +194,9 @@ export async function run({remoteConfigPath,client:initialClient,sessionDescript
     }else if(command==='4')await panelMenu(client);
     else if(command==='5')await instanceMenu(client,{ask,confirm:confirmTransfer,showError});
     else if(command==='6')await imageMenu(client,{ask,confirm:confirmTransfer,showError});
-    else console.log('请输入 1、2、3、4、5、6 或 q。');
+    else if(command==='7')await provisionMenu(client,{ask,confirm:confirmTransfer,showError});
+    else if(command==='8')await resourceMenu(client,{ask,confirm:confirmTransfer,showError});
+    else console.log('请输入 1 至 8 或 q。');
     }catch(error){
       showError(error);
     }

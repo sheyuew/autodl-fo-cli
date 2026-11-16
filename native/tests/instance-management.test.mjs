@@ -1,19 +1,20 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{WebClient}from'../web-client.mjs';
 const session={token:'fixture-token',user:{id:1,sub_name:'alice@team'}};
 async function fixture(t){
- const seen=[],state={row:{uuid:'one',name:'example',status:'shutdown',charge_type:'payg',machine_id:'host',req_gpu_amount:2,root_password:'secret',jupyter_token:'token'},price:5000,disconnect:false};
+ const seen=[],state={row:{uuid:'one',name:'example',status:'shutdown',charge_type:'payg',machine_id:'host',req_gpu_amount:2,root_password:'secret',jupyter_token:'token'},price:5000,disconnect:false,snapshot:{expand_data_disk_size:1073741824,expand_system_disk_size:0,machine_info_snapshot:{cpu_num:8,memory:32000000000,max_instance_disk_size:50*1073741824}},orderPrice:{data_disk_info:{data_disk_deal_daily_price:2400},prepay_expand_data_disk:false},diskPrice:{max_expand_size:1000*1073741824,data_disk_deal_daily_price:6000,prepay_expand_data_disk:false}};
  const server=createServer(async(q,r)=>{let raw='';for await(const p of q)raw+=p;const body=raw?JSON.parse(raw):null;seen.push({path:q.url,method:q.method,body});let data;
  if(q.url==='/api/v1/sub_user/instance')data={list:[state.row],result_total:1};
- else if(q.url.startsWith('/api/v1/sub_user/instance/snapshot?'))data={payg_price:state.price,expand_data_disk_size:1073741824,expand_system_disk_size:0,machine_info_snapshot:{cpu_num:8,memory:32000000000},root_password:'secret'};
- else if(q.url==='/api/v1/sub_user/order/price/preview')data={payg_price:state.price,data_disk_info:{data_disk_deal_daily_price:2400},prepay_expand_data_disk:false};
+ else if(q.url.startsWith('/api/v1/sub_user/instance/snapshot?'))data={payg_price:state.price,...state.snapshot,root_password:'secret'};
+ else if(q.url==='/api/v1/sub_user/order/price/preview'){await state.beforePrice?.();data={payg_price:state.price,...state.orderPrice};}
+ else if(q.url==='/api/v1/sub_user/order/data_disk/change/preview')data=state.diskPrice;
  else if(q.url==='/api/v1/sub_user/image/private/list')data={list:[{id:42,image_uuid:'img',name:'saved',status:'success',image_size:100,bucket_name:'private'}],result_total:1};
  else if(q.url.startsWith('/api/v1/sub_user/instance/monitor?'))data={uuid:'one',UsageInfo:{cpu_usage_percent:5}};
- else if(['/api/v1/sub_user/image/private/update','/api/v1/sub_user/image/private/delete','/api/v1/sub_user/instance/power_on','/api/v1/sub_user/instance/power_off','/api/v1/sub_user/instance/restart','/api/v1/sub_user/instance/name','/api/v1/sub_user/instance/timed/shutdown','/api/v1/sub_user/instance/image/save','/api/v1/sub_user/instance/release'].includes(q.url)){if(state.disconnect){q.socket.destroy();return;}data=null;}
+ else if(['/api/v1/sub_user/order/data_disk/change','/api/v1/sub_user/image/private/update','/api/v1/sub_user/image/private/delete','/api/v1/sub_user/instance/power_on','/api/v1/sub_user/instance/power_off','/api/v1/sub_user/instance/restart','/api/v1/sub_user/instance/name','/api/v1/sub_user/instance/timed/shutdown','/api/v1/sub_user/instance/image/save','/api/v1/sub_user/instance/release'].includes(q.url)){if(state.disconnect){q.socket.destroy();return;}data=null;}
  else {r.statusCode=404;r.end('{}');return;}
  r.end(JSON.stringify({code:'Success',data}));});server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close();});
  return {seen,state,client:new WebClient({session,baseUrl:`http://127.0.0.1:${server.address().port}`})};
 }
-const writes=seen=>seen.filter(q=>/\/(power_on|power_off|restart|name|shutdown|save|release)$/.test(q.path));
+const writes=seen=>seen.filter(q=>/\/(power_on|power_off|restart|name|shutdown|save|release|change)$/.test(q.path));
 test('power on prepares live compute and disk costs, and only a confirmed one-use plan submits',async t=>{
  const {client,seen}=await fixture(t);assert.equal(typeof client.prepareInstance,'function');
  const plan=await client.prepareInstance('powerOn','one');assert.equal(plan.quote.computeHourly,5);assert.equal(plan.quote.storageDaily,2.4);assert.equal(plan.quote.totalHourly,5.1);assert.equal(writes(seen).length,0);
@@ -21,6 +22,19 @@ test('power on prepares live compute and disk costs, and only a confirmed one-us
  assert.deepEqual(await client.executeInstance(plan.id,{confirmed:true}),{accepted:true,action:'powerOn',instanceUuid:'one'});
  assert.deepEqual(writes(seen),[{path:'/api/v1/sub_user/instance/power_on',method:'POST',body:{instance_uuid:'one'}}]);
  await assert.rejects(client.executeInstance(plan.id,{confirmed:true}),{code:'PLAN_EXPIRED'});
+});
+
+test('power-on authorization is checked after a live delayed HTTP quote and before the actual write',async t=>{
+ const {client,state,seen}=await fixture(t),plan=await client.prepareInstance('powerOn','one');let entered,release,allowed=true;
+ const reading=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve);state.beforePrice=async()=>{entered();await gate;};
+ const executing=client.executeInstance(plan.id,{confirmed:true,beforeSubmit:()=>{if(!allowed)throw Object.assign(new Error('stopped'),{code:'TASK_STOPPED'});}});await reading;allowed=false;release();
+ await assert.rejects(executing,{code:'TASK_STOPPED'});assert.equal(writes(seen).length,0);
+});
+
+test('power-on plans expiring during live quote revalidation never submit a paid write',async t=>{
+ const {client,state,seen}=await fixture(t),plan=await client.prepareInstance('powerOn','one'),realNow=Date.now;state.beforePrice=()=>{Date.now=()=>plan.expiresAt;};
+ try{await assert.rejects(client.executeInstance(plan.id,{confirmed:true}),{code:'PLAN_EXPIRED'});}finally{Date.now=realNow;}
+ assert.equal(writes(seen).length,0);
 });
 test('ownership, state, arguments and unknown actions are rejected without a mutation',async t=>{
  const {client,seen,state}=await fixture(t);assert.equal(typeof client.prepareInstance,'function');
@@ -67,4 +81,62 @@ test('image rename and delete resolve the provider ID from the current account a
  assert.deepEqual(seen.filter(x=>/private\/(update|delete)$/.test(x.path)),[
  {path:'/api/v1/sub_user/image/private/update',method:'POST',body:{image_id:42,image_name:'new image'}},
  {path:'/api/v1/sub_user/image/private/delete',method:'DELETE',body:{image_id:42}}]);
+});
+
+// Omitting system storage charges would understate the amount being confirmed.
+test('power on includes a priced expanded system disk instead of rejecting every expanded instance',async t=>{
+ const {client,state,seen}=await fixture(t);
+ state.snapshot.expand_system_disk_size=30*1073741824;
+ state.orderPrice.system_disk_info={deal_daily_price:1200};
+ const p=await client.prepareInstance('powerOn','one');
+ assert.equal(p.quote.computeHourly,5);assert.equal(p.quote.dataDiskDaily,2.4);
+ assert.equal(p.quote.systemDiskDaily,1.2);assert.equal(p.quote.storageDaily,3.6);
+ assert.equal(p.quote.totalHourly,5.15);assert.equal(p.quote.storageChargedWhileStopped,true);
+ assert.equal(seen.find(q=>q.path.endsWith('/order/price/preview')).body.expand_system_disk,30*1073741824);
+ await client.executeInstance(p.id,{confirmed:true});assert.equal(writes(seen).length,1);
+});
+test('incomplete, invalid or prepaid storage quotes cannot authorize power on',async t=>{
+ const {client,state,seen}=await fixture(t);
+ state.snapshot.expand_system_disk_size=30*1073741824;
+ await assert.rejects(client.prepareInstance('powerOn','one'),{code:'QUOTE_UNAVAILABLE'});
+ state.orderPrice.system_disk_info={deal_daily_price:-1};await assert.rejects(client.prepareInstance('powerOn','one'),{code:'QUOTE_UNAVAILABLE'});
+ state.orderPrice.system_disk_info={deal_daily_price:1000};state.orderPrice.prepay_expand_data_disk=true;
+ await assert.rejects(client.prepareInstance('powerOn','one'),{code:'QUOTE_UNAVAILABLE'});assert.equal(writes(seen).length,0);
+});
+test('data disk expansion previews target paid capacity and submits only the increment once confirmed',async t=>{
+ const {client,state,seen}=await fixture(t);state.row.status='running';
+ const p=await client.prepareInstance('expandDataDisk','one',{sizeGB:20});
+ assert.deepEqual(p.diskChange,{disk:'data',baseGB:50,currentExpansionGB:1,targetExpansionGB:20,increaseGB:19,currentTotalGB:51,targetTotalGB:70});
+ assert.deepEqual(p.quote,{currency:'CNY',dataDiskDaily:6,storageDaily:6,storageChargedWhileStopped:true,storagePrepaid:false});
+ assert.match(p.warning,/重启/);assert.match(p.warning,/最高容量/);
+ assert.equal(writes(seen).length,0);
+ assert.deepEqual(seen.find(q=>q.path.endsWith('/change/preview')).body,{instance_uuid:'one',machine_id:'host',opt_type:'data_disk_expand',change_size:19*1073741824,data_disk_expand_size:20*1073741824});
+ await assert.rejects(client.executeInstance(p.id),{code:'CONFIRMATION_REQUIRED'});
+ await client.executeInstance(p.id,{confirmed:true});
+ assert.deepEqual(writes(seen),[{path:'/api/v1/sub_user/order/data_disk/change',method:'POST',body:{instance_uuid:'one',machine_id:'host',opt_type:'data_disk_expand',change_size:19*1073741824,data_disk_expand_size:19*1073741824}}]);
+ await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_EXPIRED'});
+});
+test('expansion rejects shrinking, malformed capacity, and unknown limits',async t=>{
+ const {client,state,seen}=await fixture(t);
+ for(const sizeGB of [0,1,-1,1.5,'20',Number.MAX_SAFE_INTEGER])await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB}),{code:'DISK_SIZE_REQUIRED'});
+ state.diskPrice.max_expand_size=10*1073741824;await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB:20}),{code:'DISK_LIMIT'});
+ delete state.diskPrice.max_expand_size;await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB:20}),{code:'QUOTE_UNAVAILABLE'});
+ state.diskPrice.max_expand_size=100*1073741824;state.diskPrice.prepay_expand_data_disk='true';
+ await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB:20}),{code:'QUOTE_UNAVAILABLE'});
+ state.diskPrice.prepay_expand_data_disk=false;state.diskPrice.data_disk_deal_daily_price=null;
+ await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB:20}),{code:'QUOTE_UNAVAILABLE'});assert.equal(writes(seen).length,0);
+});
+test('disk capacity or quote changes invalidate expansion before any provider write',async t=>{
+ const {client,state,seen}=await fixture(t);
+ let p=await client.prepareInstance('expandDataDisk','one',{sizeGB:20});
+ state.snapshot.expand_data_disk_size=2*1073741824;await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_CHANGED'});
+ p=await client.prepareInstance('expandDataDisk','one',{sizeGB:20});state.diskPrice.data_disk_deal_daily_price=7000;
+ await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_CHANGED'});assert.equal(writes(seen).length,0);
+});
+test('expansion rejects prepaid billing and treats disconnected submission as uncertain without retry',async t=>{
+ const {client,state,seen}=await fixture(t);state.row.charge_type='monthly';
+ await assert.rejects(client.prepareInstance('expandDataDisk','one',{sizeGB:20}),{code:'QUOTE_UNAVAILABLE'});
+ state.row.charge_type='payg';const p=await client.prepareInstance('expandDataDisk','one',{sizeGB:20});state.disconnect=true;
+ await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'ACTION_UNCERTAIN'});
+ await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_EXPIRED'});assert.equal(writes(seen).length,1);
 });

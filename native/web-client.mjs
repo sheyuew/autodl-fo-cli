@@ -1,4 +1,5 @@
 import {InstanceManager} from './instance-management.mjs';
+import {ProvisioningManager} from './provisioning.mjs';
 const origin='https://www.autodl.com';
 const endpoints=Object.freeze({
   instances:{path:'/api/v1/instance',method:'POST'},
@@ -14,7 +15,7 @@ function failure(code,message,details={}){return Object.assign(new Error(message
 
 /** Web-session backend. Credentials, sessions and confirmation plans stay in memory. */
 export class WebClient{
-  #session;#expired=false;#baseUrl;#timeoutMs;#manager;
+  #session;#expired=false;#baseUrl;#timeoutMs;#manager;#provision;
   constructor({session,expectedUsername,baseUrl=origin,timeoutMs=15000}){
     const user=session?.user,username=user?.sub_name||user?.username||user?.phone;
     if(!session?.token||!(user?.uuid||user?.id)||!username)throw failure('LOGIN_REQUIRED','缺少已验证的 AutoDL 登录会话');
@@ -23,7 +24,8 @@ export class WebClient{
     if(u.origin!==origin&&!(u.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(u.hostname)))throw failure('INVALID_ORIGIN','只允许 AutoDL 官方域名或本地测试服务');
     this.#session=structuredClone(session);this.#baseUrl=u.origin;this.#timeoutMs=timeoutMs;
     this.identity=Object.freeze({id:String(user.uuid||user.id),username,subaccount:!!user.sub_name});
-    this.#manager=new InstanceManager({instances:()=>this.instances(),snapshot:id=>this.snapshot(id),read:(op,args)=>this.read(op,args),pages:(op,args)=>this.#pages(op,args),request:(endpoint,body)=>this.#request(endpoint,body)});
+    const api={instances:()=>this.instances(),snapshot:id=>this.snapshot(id),read:(op,args)=>this.read(op,args),pages:(op,args)=>this.#pages(op,args),request:(endpoint,body)=>this.#request(endpoint,body),machines:args=>this.machines(args)};
+    this.#manager=new InstanceManager(api);this.#provision=new ProvisioningManager(api);
   }
   get authenticated(){return !this.#expired;}
   async read(operation,body){
@@ -79,6 +81,9 @@ export class WebClient{
   executeImage(id,options){return this.#manager.executeImage(id,options);}
   prepareInstance(action,uuid,args){return this.#manager.prepare(action,uuid,args);}
   executeInstance(id,options){return this.#manager.execute(id,options);}
+  provisionCatalog(args){return this.#provision.catalog(args);}
+  prepareProvision(mode,args){return this.#provision.prepare(mode,args);}
+  executeProvision(id,options){return this.#provision.execute(id,options);}
   regions(){return this.read('regions');}
   gpuTypes(){return this.read('gpuTypes');}
   regionalGpus(regionSigns){return this.read('regionalGpus',{region_sign_list:regionSigns});}

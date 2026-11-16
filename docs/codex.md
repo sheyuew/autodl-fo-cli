@@ -27,7 +27,7 @@ bash ./fo login --account '用户名@主账户ID'
 
 Codex 可以提示账号、实例和路径，**密码由用户本人在隐藏终端提示中输入**。不要让用户把密码发到聊天，也不要把密码或 Token 放在命令参数、环境变量、JSON、临时文件或 Git 中。登录后重新运行 `doctor --json`，再继续原任务。账号不同就独立登录和切换，不复用另一个人的会话。
 
-登录状态只在本机的会话进程内存中。进程自动启动，用当前用户的私有 Unix socket 通信，没有 TCP 服务端口。账号名称会持久保存；密码与登录 Token 不保存。空闲 30 分钟、电脑重启或会话进程退出后需重新登录，平台也可能让会话过期。会话结束也会清除 AutoPanel handle 和确认计划，重新登录后应重新选择实例和生成预览。
+登录状态只在本机会话进程内存中。进程自动启动，用当前用户的私有 Unix socket 通信，没有 TCP 服务端口。账号名称、任务策略/进度和通知记录保存在本机，各账号隔离；密码及 Token 不保存。没有活动抢卡任务时空闲 30 分钟退出，活动任务保留后台进程。电脑重启或会话进程退出后需重新登录，平台也可能让会话过期。会话结束会清除 AutoPanel handle 和确认计划，重新登录后应重新选择实例并生成预览。
 
 平台要求额外验证时，命令会明确报错，不自动打开浏览器；不能把这类失败报告成登录成功。
 
@@ -63,6 +63,7 @@ bash ./fo image list --json
 | `cancelShutdown` | 取消定时关机 | 无 |
 | `saveImage` | 保存系统盘镜像 | `--name '镜像名称'` |
 | `release` | 释放实例，永久删除系统盘及数据盘 | 无 |
+| `expandDataDisk` | 扩容普通实例数据盘 | `--size-gb N`，额外付费部分的目标总 GB |
 
 例如，先生成开机计划：
 
@@ -76,7 +77,7 @@ bash ./fo instance prepare INSTANCE_UUID powerOn --json
 bash ./fo instance execute PLAN_ID --confirm yes --json
 ```
 
-`--confirm no` 取消，不发送修改请求。未给确认不会执行。计划属于当前账号、两分钟有效且只使用一次；开机确认时会复查报价和状态。计划过期、报价或状态改变时，重新生成计划并让用户确认。当前开机只支持按量计费且未扩容系统盘的配置。
+`--confirm no` 取消，不发送修改请求。未给确认不会执行。计划属于当前账号、两分钟有效且只使用一次；开机确认时会复查报价和状态。计划过期、报价或状态改变时，重新生成计划并让用户确认。当前范围为普通按量计费容器；已扩容数据盘的实例支持开机，报价包含计算及存储费用。系统盘扩容和 Pro 不在此版本范围。
 
 镜像使用同样的流程：
 
@@ -88,6 +89,80 @@ bash ./fo image execute PLAN_ID --confirm yes --json
 ```
 
 用户提出一个修改请求，不等于已经批准最终参数或付费。Codex 不自行填写用户的最终 `yes`。响应中断或返回结果未知时先查询实例/镜像状态，避免重复提交。
+
+## 新建、克隆与数据盘扩容
+
+先查询可选主机，再按机器读取其基础/私有镜像目录和驱动：
+
+```bash
+bash ./fo provision catalog --regions REGION_A --gpu GPU_NAME --gpu-count 1 --json
+bash ./fo provision catalog --machine-id MACHINE_ID --json
+```
+
+主机 ID、镜像 UUID、地区和 GPU 名称均从真实目录取得。使用所选主机对应的 `images`，基础镜像 `imageType:"base"`，私有镜像 `imageType:"private"`；驱动由主机决定。新建示例中所有 ID 都是占位，先换为用户选择的目录值：
+
+```bash
+bash ./fo provision prepare create --data '{"machineId":123,"gpuCount":1,"imageUuid":"IMAGE_UUID","imageType":"base","name":"实验实例","dataDiskGB":100}' --json
+```
+
+向用户展示返回的 `configuration`、完整 `quote` 与后果，得到最终 `yes/no` 后才调用 `provision execute`。使用返回的 `id`：
+
+```bash
+bash ./fo provision execute PLAN_ID --confirm yes --json
+```
+
+克隆使用当前账号关机实例，源实例保留；系统盘必拷贝，`copyDataDisk` 默认 false。用户需要拷贝数据盘时明确设 true，并确认目标总容量能容纳源盘：
+
+```bash
+bash ./fo provision prepare clone --data '{"machineId":123,"gpuCount":1,"sourceInstanceUuid":"SOURCE_UUID","name":"克隆实例","dataDiskGB":100,"copyDataDisk":false}' --json
+```
+
+新建与克隆只支持普通按量计费容器。镜像需通过主机芯片、CPU 架构、CUDA 上限和 GPU 架构最低 CUDA 校验；遇到 `IMAGE_INCOMPATIBLE` 重新选择，不能通过重新提交绕过。`accepted:true`、`state:"submitted"` 仅代表请求接受，继续用返回 `instanceUuid` 查询实例；只有实际运行才能报告租卡完成。
+
+数据盘扩容示例：
+
+```bash
+bash ./fo instance prepare INSTANCE_UUID expandDataDisk --size-gb 100 --json
+bash ./fo instance execute PLAN_ID --confirm yes --json
+```
+
+`dataDiskGB` 与 `--size-gb`（API 中 `sizeGB`）统一表示**额外付费部分的目标总 GB**。免费 50 GB、现有付费 20 GB、目标付费 100 GB 时，总容量为 150 GB，本次新增 80 GB。展示预览中的原值、目标、增量、日费与重启要求后取得 yes/no；执行后查询实际容量，有重启要求时另行预览重启并确认。数据盘费用可在关机后继续计收。此版本不执行系统盘扩容。
+
+## 自动抢卡与结果通知
+
+自动任务是一段有明确边界的付费授权。先按用户意图确定模式、原实例或地区/GPU 数量、镜像或克隆源、额外数据盘、最高总时价、监控时限和次数，得到完整预览后再要求最终 yes/no。先查 `task list`，同一目标已有活动任务时继续查询它，避免重复授权。
+
+新建任务示例，先把地区、GPU 和镜像换成真实目录值：
+
+```bash
+bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A"],"gpuNames":["GPU_NAME"],"gpuCount":1,"imageUuid":"IMAGE_UUID","imageType":"base","name":"实验实例","dataDiskGB":100,"maxHourly":3,"maxMinutes":60,"maxAttempts":120,"intervalSeconds":30}' --json
+```
+
+克隆使用 `mode:"clone"`、`sourceInstanceUuid`，明确 `copyDataDisk`；原实例开机使用 `mode:"powerOn"` 和 `instanceUuid`，目标绑定该实例的现有主机/地区/GPU 与磁盘配置。三种模式都需 `maxHourly`；它包含计算时费和存储日费折算，不只是单卡报价。间隔至少 10 秒，默认 30 秒；默认最多 60 分钟、120 次，实际停止以先达到的限制为准。
+
+展示返回的 `policy`、`budget`、`oneSuccessOnly`、当前候选及报价；无候选时明确当前无卡和未来提交条件。用户确认的是在所列条件和最高总时价内尝试一次成功，不是无上限循环购买。使用返回的 **`planId`** 启动：
+
+```bash
+bash ./fo task start PLAN_ID --confirm yes --json
+bash ./fo task list --json
+bash ./fo task info TASK_ID --json
+bash ./fo task watch TASK_ID
+bash ./fo notifications --json
+bash ./fo notifications --after CURSOR --json
+```
+
+`task watch` 是终端前台跟踪，不加 `--json`；机器查询用 `task info`。后台任务可在关闭登录终端、菜单或 watch 后继续，电脑必须保持开机、唤醒和联网。任务结束会尝试本地桌面提醒，通知记录可用 `notifications` 查询，按 `cursor` 增量读取。
+
+状态判断：`waiting/quoting` 是等待与报价，`submitting` 是提交，`verifying` 是核查已接受的请求，**只有 `completed` 且目标实际 running 才报告抢卡成功**。`submitted` 不是运行成功；`uncertain` 时先查返回的实例 UUID 和实例列表，停止自动提交。时限限制监控，不会关闭已租到的实例；任务成功后实例持续计费，用户使用完再按流程关机。
+
+取消先展示目标，再让用户确认：
+
+```bash
+bash ./fo task cancel TASK_ID --json
+bash ./fo task cancel TASK_ID --confirm yes --json
+```
+
+取消会停止本地监控；已经发出的开机/新建请求需继续查询，取消不等于删除或关机。每个任务最多成功一次。电脑或会话进程重启后仅保留任务记录，付费授权不自动恢复：先查询已有实例，确需继续时重新 prepare 并获得新 yes/no；不要自行恢复旧任务或用新任务覆盖结果未知的请求。
 
 ## AutoPanel 与文件传输
 
@@ -173,4 +248,4 @@ bash ./fo panel watch HANDLE
 
 ## 远程历史部署
 
-`bash ./fo remote ...` 显式使用原有 SSH 服务器配置；本地模式不读取它来连接服务器。保留远程模式供已有部署迁移，见 [服务器说明](server.md)。不要将别人的连接配置、密钥或账号加入仓库。本地版本没有抢卡任务引擎，不会恢复旧 Fo 监控任务。
+`bash ./fo remote ...` 显式使用原有 SSH 服务器配置；本地模式不读取它来连接服务器。保留远程模式供已有部署迁移，见 [服务器说明](server.md)。不要将别人的连接配置、密钥或账号加入仓库。本地抢卡任务与旧 Fo 监控任务独立，不会恢复或迁移旧 Fo 任务。

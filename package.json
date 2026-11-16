@@ -1,8 +1,8 @@
 {
   "name": "autodl-fo-cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
-  "description": "AutoDL 子账号本地 HTTP 与 AutoPanel 终端，支持 Codex 子命令和 JSON 输出",
+  "description": "AutoDL 子账号本地 CLI：抢卡、新建克隆、数据盘扩容与 AutoPanel，支持 Codex 和 JSON 输出",
   "type": "module",
   "bin": {
     "fo": "cli.mjs"

@@ -62,7 +62,7 @@ export async function selectLocalAccount(username,{home=localHome()}={}){
 function socketTransport(socket){
  return request=>new Promise((resolve,reject)=>{
   const conn=createConnection(socket);let data='',finished=false,submitted=false;
-  const uncertain=()=>submitted&&request.op==='panel-transfer'?fail('TRANSFER_UNCERTAIN','提交结果未知，请先查看传输记录，避免重复提交',{retryable:false}):submitted&&['instance-execute','image-execute','panel-task'].includes(request.op)?fail('ACTION_UNCERTAIN','请求结果未知，请先刷新状态，避免重复提交',{retryable:false}):fail('NETWORK','本地会话请求中断或响应无效，请稍后重试',{retryable:true});
+  const uncertain=()=>submitted&&request.op==='panel-transfer'?fail('TRANSFER_UNCERTAIN','提交结果未知，请先查看传输记录，避免重复提交',{retryable:false}):submitted&&['instance-execute','image-execute','panel-task','provision-execute','task-start','task-cancel'].includes(request.op)?fail('ACTION_UNCERTAIN','请求结果未知，请先刷新状态，避免重复提交',{retryable:false}):fail('NETWORK','本地会话请求中断或响应无效，请稍后重试',{retryable:true});
   const done=(error,value)=>{if(finished)return;finished=true;clearTimeout(timer);conn.destroy();error?reject(error):resolve(value);};
   const timer=setTimeout(()=>done(uncertain()),180000);conn.setEncoding('utf8');
   conn.on('connect',()=>{submitted=true;conn.end(JSON.stringify(request)+'\n');});

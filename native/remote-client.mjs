@@ -4,7 +4,7 @@ export function sshTransport(config,base){
   const args=sshArgs(config,base);
   return request=>new Promise((resolve,reject)=>{
     const child=spawn('ssh',args,{stdio:['pipe','pipe','pipe']});let output='',done=false;
-    const uncertain=()=>request.op==='panel-transfer'?failure('TRANSFER_UNCERTAIN','提交结果未知，请先查看传输记录，避免重复提交',{retryable:false}):['instance-execute','image-execute','panel-task'].includes(request.op)?failure('ACTION_UNCERTAIN','请求结果未知，请先刷新状态，避免重复提交',{retryable:false}):failure('NETWORK','服务器 SSH 连接失败或超时',{retryable:true});
+    const uncertain=()=>request.op==='panel-transfer'?failure('TRANSFER_UNCERTAIN','提交结果未知，请先查看传输记录，避免重复提交',{retryable:false}):['instance-execute','image-execute','panel-task','provision-execute','task-start','task-cancel'].includes(request.op)?failure('ACTION_UNCERTAIN','请求结果未知，请先刷新状态，避免重复提交',{retryable:false}):failure('NETWORK','服务器 SSH 连接失败或超时',{retryable:true});
     const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);error?reject(error):resolve(value);};
     const timer=setTimeout(()=>{child.kill();finish(uncertain());},180000);
     child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{output+=chunk;if(Buffer.byteLength(output)>8*1024*1024){child.kill();finish(uncertain());}});
@@ -36,6 +36,15 @@ export class RemoteClient{
   executeImage(planId,{confirmed=false}={}){return this.#request({op:'image-execute',planId,confirmed});}
   prepareInstance(action,instanceUuid,args={}){return this.#request({op:'instance-prepare',instanceUuid,action,args});}
   executeInstance(planId,{confirmed=false}={}){return this.#request({op:'instance-execute',planId,confirmed});}
+  provisionCatalog(args={}){return this.#request({op:'provision-catalog',args});}
+  prepareProvision(mode,args={}){return this.#request({op:'provision-prepare',mode,args});}
+  executeProvision(planId,{confirmed=false}={}){return this.#request({op:'provision-execute',planId,confirmed});}
+  prepareTask(policy){return this.#request({op:'task-prepare',policy});}
+  startTask(planId,{confirmed=false}={}){return this.#request({op:'task-start',planId,confirmed});}
+  tasks(){return this.#request({op:'task-list'});}
+  taskInfo(taskId){return this.#request({op:'task-info',taskId});}
+  cancelTask(taskId,{confirmed=false}={}){return this.#request({op:'task-cancel',taskId,confirmed});}
+  notifications(after=0){return this.#request({op:'notifications',after});}
   async openPanel(instanceUuid){
     const {handle}=await this.#request({op:'panel-open',instanceUuid}),request=q=>this.#request({handle,...q});
     return {

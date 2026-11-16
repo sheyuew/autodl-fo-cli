@@ -2,11 +2,12 @@ import {parseArgs} from 'node:util';
 import {connectLocal,loginLocal,listLocalAccounts,selectLocalAccount,logoutLocal} from './local-session.mjs';
 import {ask,secret,run as menu,followTransfers} from './cli.mjs';
 import {isMain} from './is-main.mjs';
+import {setTimeout as sleep} from 'node:timers/promises';
 
 const fail=(code,message)=>Object.assign(new Error(message),{code});
-const flags={json:{type:'boolean'},help:{type:'boolean',short:'h'},directory:{type:'boolean'},...Object.fromEntries(['account','confirm','regions','gpu','idle','name','shutdown-at','data','path','disk-id','file-id','file-name','remote-directory','parent-file-id','local-path','source','limit','task-id'].map(k=>[k,{type:'string'}]))};
-const readOps=new Set(['doctor','status','instances','regions','gpu-types','machines','instance-info','instance-monitor','instance-connection','images','instance-prepare','image-prepare','panel-open','panel-read','panel-cloud','notifications']);
-const executeOps=new Set(['instance-execute','image-execute']);
+const flags={json:{type:'boolean'},help:{type:'boolean',short:'h'},directory:{type:'boolean'},...Object.fromEntries(['account','confirm','regions','gpu','gpu-count','machine-id','size-gb','after','query','idle','name','shutdown-at','data','path','disk-id','file-id','file-name','remote-directory','parent-file-id','local-path','source','limit','task-id'].map(k=>[k,{type:'string'}]))};
+const readOps=new Set(['doctor','status','instances','regions','gpu-types','machines','instance-info','instance-monitor','instance-connection','images','instance-prepare','image-prepare','provision-catalog','provision-prepare','task-prepare','task-list','task-info','panel-open','panel-read','panel-cloud','notifications']);
+const executeOps=new Set(['instance-execute','image-execute','provision-execute','task-start']);
 const panelWrites=new Set(['panel-transfer','panel-task']);
 const credentialKeys=/password|token|authorization|credential|secret|private.?key/i;
 const help=`AutoDL 本地 HTTP CLI · Node.js 20.17+ · 无 npm 依赖
@@ -21,12 +22,27 @@ bash ./fo logout [--account 账号] 清除所选账号内存会话
 fo instances|regions|gpus --json
 fo machines --regions 地区1,地区2 [--gpu 型号] [--idle 1] --json
 fo instance info|monitor|connection 实例ID --json
-fo instance prepare 实例ID 操作 [--name 名称] [--shutdown-at 'YYYY-MM-DD HH:mm'] --json
+fo instance prepare 实例ID 操作 [--name 名称] [--shutdown-at 'YYYY-MM-DD HH:mm'] [--size-gb 额外数据盘目标GB] --json
 fo instance execute 计划ID --confirm yes --json
-  操作：powerOn powerOff restart rename timedShutdown cancelShutdown saveImage release
+  操作：powerOn powerOff restart rename timedShutdown cancelShutdown saveImage release expandDataDisk
 fo image list --json
 fo image prepare 镜像ID rename|delete [--name 名称] --json
 fo image execute 计划ID --confirm yes --json
+
+fo provision catalog --regions 地区 [--gpu 型号] [--gpu-count 1] [--machine-id ID] --json
+fo provision prepare create|clone --data 'JSON配置' --json
+fo provision execute 计划ID --confirm yes --json
+  配置：machineId,gpuCount,name,dataDiskGB（额外付费GB）,imageUuid（新建）
+  克隆改用 sourceInstanceUuid，可加 copyDataDisk；系统盘不扩容。
+fo task prepare --data 'JSON条件' --json
+fo task start 计划ID --confirm yes --json
+  条件：mode=powerOn|create|clone，maxHourly必填；新建/克隆还需地区、GPU、数量及数据盘。
+  maxMinutes默认60，maxAttempts默认120，intervalSeconds默认30（最少10秒）。
+fo task list --json
+fo task info 任务ID --json
+fo task cancel 任务ID [--confirm yes|no] --json
+fo task watch 任务ID            前台跟踪；抢卡本身在本机后台运行
+fo notifications [--after 0] --json
 
 fo panel open 实例ID --json
 fo panel login 句柄             本机终端隐藏输入独立 AutoPanel 密码
@@ -73,7 +89,7 @@ async function login(options){
  const saved=await listLocalAccounts();
  const username=options.account||(await ask(`AutoDL 子账号${saved.current?' ['+saved.current+']':''}：`))||saved.current;
  required(username,'AutoDL 子账号');let password=await secret('密码（不回显）：');
- try{const c=await loginLocal(username,password);console.log(`本地登录成功：${c.username}。会话保存在本机内存，空闲 30 分钟或 logout 后需重新登录。`);return c;}
+ try{const c=await loginLocal(username,password);console.log(`本地登录成功：${c.username}。会话保存在本机内存；没有活动抢卡任务时空闲 30 分钟退出，logout 后需重新登录。`);return c;}
  finally{password=undefined;}
 }
 async function invoke(request,options,{kind='read'}={}){
@@ -91,7 +107,20 @@ async function invoke(request,options,{kind='read'}={}){
   }
   request={...request,confirmed:true};
  }
- return (await context(options)).request(request);
+ const c=['task-list','task-info','notifications'].includes(request.op)?await connectLocal({username:options.account}):await context(options);
+ return c.request(request);
+}
+async function watchTask(taskId,options){
+ if(options.json)throw fail('TTY_REQUIRED','task watch 持续输出进度，请不带 --json；机器查询请用 task info');
+ tty();const controller=new AbortController(),stop=()=>controller.abort();process.on('SIGINT',stop);let last;
+ try{
+  for(;;){
+   const result=await invoke({op:'task-info',taskId},options),key=JSON.stringify([result.state,result.attempts,result.errorCode,result.instanceUuid]);
+   if(key!==last){console.dir(result,{depth:5});last=key;}
+   if(!['waiting','quoting','submitting','verifying'].includes(result.state)||controller.signal.aborted)return {stopped:true};
+   try{await sleep(5000,undefined,{signal:controller.signal});}catch(error){if(error.name!=='AbortError')throw error;return {stopped:true};}
+  }
+ }finally{process.removeListener('SIGINT',stop);}
 }
 async function transferPreview(request,q){
  if(!['upload','download'].includes(q.direction))throw fail('INVALID_REQUEST','请选择上传或下载');
@@ -166,19 +195,35 @@ async function dispatch(words,options){
  const reads={instances:'instances',regions:'regions',gpus:'gpu-types'};
  if(Object.hasOwn(reads,command))return invoke({op:reads[command]},options);
  if(command==='machines')return invoke({op:'machines',args:{regionSigns:required(options.regions,'--regions').split(',').filter(Boolean),gpuNames:options.gpu?options.gpu.split(','):[],idle:integer(options.idle,1,'空闲卡数量')}},options);
+ if(command==='notifications')return invoke({op:'notifications',after:options.after===undefined?0:Number(options.after)},options);
+ if(command==='provision'){
+  if(action==='catalog')return invoke({op:'provision-catalog',args:{regionSigns:options.regions?options.regions.split(',').filter(Boolean):[],gpuNames:options.gpu?options.gpu.split(','):[],gpuCount:integer(options['gpu-count'],1,'GPU数量'),...(options['machine-id']?{machineId:required(options['machine-id'],'机器ID')}:{})}},options);
+  if(action==='prepare'){const data=dataJSON(options.data);inspectData(data);return invoke({op:'provision-prepare',mode:required(id,'create 或 clone'),args:data},options);}
+  if(action==='execute')return invoke({op:'provision-execute',planId:required(id,'计划ID')},options,{kind:'execute'});
+  throw fail('USAGE','provision 支持 catalog、prepare、execute');
+ }
+ if(command==='task'){
+  if(action==='prepare'){const data=dataJSON(options.data);inspectData(data);return invoke({op:'task-prepare',policy:data},options);}
+  if(action==='start')return invoke({op:'task-start',planId:required(id,'计划ID')},options,{kind:'execute'});
+  if(action==='list')return invoke({op:'task-list'},options);
+  if(action==='info')return invoke({op:'task-info',taskId:required(id,'任务ID')},options);
+  if(action==='cancel')return invoke({op:'task-cancel',taskId:required(id,'任务ID')},options,{kind:'mutation'});
+  if(action==='watch')return watchTask(required(id,'任务ID'),options);
+  throw fail('USAGE','task 支持 prepare、start、list、info、cancel、watch');
+ }
  if(['instance','image'].includes(command)){
   if(command==='image'&&action==='list')return invoke({op:'images'},options);
   required(id,action==='execute'?'计划ID':command==='instance'?'实例ID':'镜像ID');
   if(command==='instance'&&['info','monitor','connection'].includes(action))return invoke({op:'instance-'+action,instanceUuid:id},options);
-  if(action==='prepare')return invoke({op:command+'-prepare',...(command==='instance'?{instanceUuid:id}:{imageUuid:id}),action:required(operation,'操作'),args:{...(options.name!==undefined?{name:options.name}:{}),...(options['shutdown-at']!==undefined?{shutdownAt:options['shutdown-at']}:{})}},options);
+  if(action==='prepare')return invoke({op:command+'-prepare',...(command==='instance'?{instanceUuid:id}:{imageUuid:id}),action:required(operation,'操作'),args:{...(options.name!==undefined?{name:options.name}:{}),...(options['shutdown-at']!==undefined?{shutdownAt:options['shutdown-at']}:{}) ,...(options['size-gb']!==undefined?{sizeGB:integer(options['size-gb'],undefined,'额外数据盘目标GB')}:{})}},options);
   if(action==='execute')return invoke({op:command+'-execute',planId:id},options,{kind:'execute'});
   throw fail('USAGE','不支持的子命令，使用 fo help 查看用法');
  }
  if(command==='panel')return panelCommand(action,id,options);
  if(command==='api'){
-  const op=required(action,'操作');if(!readOps.has(op)&&!executeOps.has(op)&&!panelWrites.has(op))throw fail('UNSUPPORTED_OPERATION','此操作不支持机器接口；登录请使用终端 login');
+  const op=required(action,'操作');if(!readOps.has(op)&&!executeOps.has(op)&&!panelWrites.has(op)&&op!=='task-cancel')throw fail('UNSUPPORTED_OPERATION','此操作不支持机器接口；登录请使用终端 login');
   const data=dataJSON(options.data);inspectData(data);
-  return invoke({...data,op},options,{kind:executeOps.has(op)?'execute':panelWrites.has(op)?'mutation':'read'});
+  return invoke({...data,op},options,{kind:executeOps.has(op)?'execute':panelWrites.has(op)||op==='task-cancel'?'mutation':'read'});
  }
  throw fail('USAGE','不支持的命令，使用 bash ./fo help 查看用法');
 }
@@ -190,7 +235,7 @@ export async function runLocal(args=process.argv.slice(2)){
   const result=await dispatch(parsed.positionals,options);
   if(options.json)console.log(JSON.stringify({ok:true,result}));
   else if(result?.help)console.log(result.help);
-  else if(!['login','panel'].includes(parsed.positionals[0])&&parsed.positionals.length)console.dir(result,{depth:8});
+  else if(!['login','panel'].includes(parsed.positionals[0])&&!(parsed.positionals[0]==='task'&&parsed.positionals[1]==='watch')&&parsed.positionals.length)console.dir(result,{depth:8});
   else if(parsed.positionals[0]==='panel'&&parsed.positionals[1]!=='login'&&parsed.positionals[1]!=='watch')console.dir(result,{depth:8});
   return result;
  }catch(error){
