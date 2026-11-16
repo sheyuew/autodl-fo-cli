@@ -10,7 +10,7 @@ root = Path(__file__).resolve().parents[1]
 version = json.loads((root / 'package.json').read_text())['version']
 if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
     raise SystemExit('Invalid release version')
-files = [root / p for p in ('fo', 'cli.mjs', 'package.json', 'README.md',
+files = [root / p for p in ('fo', 'cli.mjs', 'legacy-cli.mjs', 'package.json', 'AGENTS.md', 'README.md',
                             'THIRD_PARTY.md', '开始使用.command')]
 files += sorted((root / 'lib').glob('*.mjs'))
 files += sorted((root / 'native').glob('*.mjs'))

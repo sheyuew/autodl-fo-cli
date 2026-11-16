@@ -14,12 +14,12 @@ function safeTasks(data){return {...pick(data,['task_success','task_total']),...
 class HttpRuntime{
   #client;#account;#panels=new Map();
   constructor({state,tenantId,baseUrl}){Object.assign(this,{state,tenantId,baseUrl});}
-  requireClient(){if(!this.#client)throw fail('LOGIN_REQUIRED','AutoDL 未登录，请在终端登录');return this.#client;}
+  requireClient(){if(!this.#client?.authenticated)throw fail('LOGIN_REQUIRED','AutoDL 未登录或登录已过期，请在终端登录');return this.#client;}
   panel(handle){const panel=this.#panels.get(handle);if(!panel)throw fail('PANEL_REQUIRED','请重新选择 AutoPanel 实例');return panel;}
   async account(panel,id){const account=(await panel.accounts()).find(a=>a.fs_id===id);if(!account)throw fail('DISK_REQUIRED','网盘不属于当前实例或尚未授权');return account;}
   async dispatch(q){
     if(!q||typeof q!=='object'||Array.isArray(q)||['tenant','socket','account'].some(k=>Object.hasOwn(q,k)))throw fail('INVALID_REQUEST','不能通过请求切换服务器账号');
-    if(q.op==='doctor')return {tenant:this.tenantId,backend:'native-http',transport:'SSH + private Unix socket + AutoDL HTTP',authenticated:!!this.#client,identity:this.#client?.identity||null,fo:false,capabilities:['instances','stock','instance-management','images','autopanel','ali-file-transfer','directory-transfer','transfer-control'],taskEngine:false};
+    if(q.op==='doctor')return {tenant:this.tenantId,backend:'native-http',transport:'SSH + private Unix socket + AutoDL HTTP',authenticated:this.#client?.authenticated===true,identity:this.#client?.authenticated?this.#client.identity:null,fo:false,capabilities:['instances','stock','instance-management','images','autopanel','ali-file-transfer','directory-transfer','transfer-control'],taskEngine:false};
     if(q.op==='notifications'){
       const data=await readJSON(join(this.state,'notifications.json'),{events:[],nextSeq:1});const after=q.after??0;
       if(!Number.isSafeInteger(after)||after<0)throw fail('INVALID_REQUEST','通知游标无效');return {tenant:this.tenantId,events:(data.events||[]).filter(e=>e.seq>after),cursor:(data.nextSeq||1)-1,truncated:false,error:null};
@@ -93,7 +93,7 @@ class HttpRuntime{
 const operations=new Set(['doctor','status','notifications','login-password','instances','regions','gpu-types','machines','catalog','instance-info','instance-connection','instance-monitor','images','image-prepare','image-execute','instance-prepare','instance-execute','panel-open','panel-login','panel-read','panel-cloud','panel-transfer','panel-task']);
 const publicCodes=new Set(['LOGIN_REQUIRED','ACCOUNT_MISMATCH','CREDENTIALS_REQUIRED','LOGIN_REJECTED','NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_REQUIRED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','INVALID_REQUEST','READ_ONLY','UNSUPPORTED_OPERATION','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','TASK_REQUIRED','INVALID_LIMIT','IMAGE_REQUIRED']);
 
-export async function startHttpServer({state,socket,tenantId='owner',baseUrl='https://www.autodl.com',logger=console.log}){
+export async function startHttpServer({state,socket,tenantId='owner',baseUrl='https://www.autodl.com',logger=console.log,onRequest,onShutdown}){
   await mkdir(state,{recursive:true,mode:0o700});const runtime=new HttpRuntime({state,tenantId,baseUrl});
   await unlink(socket).catch(e=>{if(e.code!=='ENOENT')throw e;});let tail=Promise.resolve();const connections=new Set();
   const server=createServer({allowHalfOpen:true},conn=>{
@@ -103,11 +103,12 @@ export async function startHttpServer({state,socket,tenantId='owner',baseUrl='ht
       if(Buffer.byteLength(input)>128*1024){done=true;conn.end(JSON.stringify({ok:false,code:'INVALID_REQUEST',error:'请求过大'})+'\n');return;}
       if(!input.includes('\n'))return;done=true;let q;
       try{q=JSON.parse(input.slice(0,input.indexOf('\n')));}catch{conn.end(JSON.stringify({ok:false,code:'INVALID_REQUEST',error:'请求格式错误'})+'\n');return;}input='';
+      const requestFinished=onRequest?.();
       const requestId=randomUUID(),op=operations.has(q?.op)?q.op:'unknown',started=Date.now();
       const work=async()=>{
-        try{const result=await runtime.dispatch(q);logger(JSON.stringify({event:'rpc.finished',requestId,op,tenant:tenantId,ok:true,durationMs:Date.now()-started}));conn.end(JSON.stringify({ok:true,result,requestId})+'\n');}
+        try{const localShutdown=q?.op==='local-shutdown'&&typeof onShutdown==='function';const result=localShutdown?{loggedOut:true}:await runtime.dispatch(q);logger(JSON.stringify({event:'rpc.finished',requestId,op,tenant:tenantId,ok:true,durationMs:Date.now()-started}));if(localShutdown)conn.once('close',()=>void onShutdown());conn.end(JSON.stringify({ok:true,result,requestId})+'\n');}
         catch(error){const code=publicCodes.has(error.code)?error.code:'INTERNAL_ERROR';logger(JSON.stringify({event:'rpc.finished',requestId,op,tenant:tenantId,ok:false,code,durationMs:Date.now()-started}));conn.end(JSON.stringify({ok:false,code,error:code==='INTERNAL_ERROR'?'服务器内部错误':error.message,requestId,...(error.retryable!==undefined?{retryable:error.retryable}:{})})+'\n');}
-        finally{if(q&&typeof q==='object')q.password=undefined;}
+        finally{if(q&&typeof q==='object')q.password=undefined;requestFinished?.();}
       };
       tail=tail.catch(()=>{}).then(work);
     });

@@ -10,9 +10,9 @@ if ! "$fo_node" -e 'const [major,minor]=process.versions.node.split(".").map(Num
   printf '当前 Node.js %s（%s）；需要 20.17.0 或更新版本。\n' "$fo_node_version" "$fo_node" >&2
   exit 1
 fi
-if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
-  printf '请先安装 OpenSSH 客户端（需要 ssh 和 ssh-keygen），再运行本程序。\n' >&2
-  exit 1
-fi
-fo_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+case "${BASH_SOURCE[0]}" in
+  */*) fo_dir=${BASH_SOURCE[0]%/*} ;;
+  *) fo_dir=. ;;
+esac
+fo_dir="$(cd -- "$fo_dir" && pwd)"
 exec "$fo_node" "$fo_dir/cli.mjs" "$@"

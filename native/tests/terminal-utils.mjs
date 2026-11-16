@@ -37,8 +37,8 @@ finally:
  if p.poll() is None:p.kill();p.wait()
  os.close(master)
 `;
-export async function runTerminal({steps,args=[],env={},baseUrl='https://www.autodl.com',timeoutSeconds=8},t){
-  const child=spawn('python3',['-c',driver,process.execPath,fileURLToPath(new URL('../cli.mjs',import.meta.url)),baseUrl,String(timeoutSeconds)],{stdio:['pipe','pipe','pipe']});
+export async function runTerminal({steps,args=[],env={},baseUrl='https://www.autodl.com',timeoutSeconds=8,entry},t){
+  const child=spawn('python3',['-c',driver,process.execPath,entry||fileURLToPath(new URL('../cli.mjs',import.meta.url)),baseUrl,String(timeoutSeconds)],{stdio:['pipe','pipe','pipe']});
   t?.after(()=>{if(child.exitCode===null)child.kill('SIGTERM');});
   let output='',error='';child.stdout.on('data',x=>output+=x);child.stderr.on('data',x=>error+=x);child.stdin.end(JSON.stringify({steps,args,env})+'\n');
   const [code]=await once(child,'exit');return {code,output,error};

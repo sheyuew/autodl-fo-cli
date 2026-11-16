@@ -8,7 +8,7 @@ async function fixture(t,version){
  return {node,run:()=>spawnSync('/bin/bash',[resolve('fo'),'help'],{encoding:'utf8',env:{...process.env,PATH:dir+':'+process.env.PATH,FO_TEST_NODE_VERSION:version,FO_CLI_HOME:join(dir,'settings')},timeout:10000})};
 }
 test('launcher accepts Node 20.17 from PATH and reaches the real CLI without network access',async t=>{
- const f=await fixture(t,'20.17.0'),p=f.run();assert.equal(p.status,0,p.stderr);assert.match(p.stdout,/fo http/);
+ const f=await fixture(t,'20.17.0'),p=f.run();assert.equal(p.status,0,p.stderr);assert.match(p.stdout,/instances/);
 });
 test('launcher rejects an unsupported Node and identifies the actual version and executable',async t=>{
  const f=await fixture(t,'20.16.0'),p=f.run();assert.notEqual(p.status,0);assert.ok(p.stderr.includes('v20.16.0'),p.stderr);assert.ok(p.stderr.includes(f.node),p.stderr);assert.ok(!p.stdout.includes('fo http'));

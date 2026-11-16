@@ -1,8 +1,8 @@
 {
   "name": "autodl-fo-cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "AutoDL 子账号 HTTP 与 AutoPanel 网盘终端，SSH 多账号隔离",
+  "description": "AutoDL 子账号本地 HTTP 与 AutoPanel 终端，支持 Codex 子命令和 JSON 输出",
   "type": "module",
   "bin": {
     "fo": "cli.mjs"

@@ -5,12 +5,12 @@ import {RemoteClient,sshTransport} from './remote-client.mjs';import {readFile} 
 import {isMain} from './is-main.mjs';
 import {instanceMenu,imageMenu} from './instance-menu.mjs';
 import {watchTransfers} from './transfer-watch.mjs';
-function ask(prompt){return new Promise((resolve,reject)=>{
+export function ask(prompt){return new Promise((resolve,reject)=>{
   const rl=readline.createInterface({input:process.stdin,output:process.stdout});let answered=false;
   rl.on('close',()=>{if(!answered)reject(Object.assign(new Error('输入已取消'),{code:'CANCELLED'}));});
   rl.question(prompt,value=>{answered=true;rl.close();resolve(value.trim());});
 });}
-function secret(prompt){
+export function secret(prompt){
   if(!process.stdin.isTTY)throw Object.assign(new Error('请输入交互式终端；验证版不接收命令行密码'),{code:'TTY_REQUIRED'});
   return new Promise((resolve,reject)=>{
     let value='';const input=process.stdin;input.setRawMode(true);input.setEncoding('utf8');input.resume();
@@ -106,7 +106,7 @@ async function browseLocal(panel){
     path=path.replace(/\/$/,'')+'/'+row.filename;
   }
 }
-async function followTransfers(panel){
+export async function followTransfers(panel){
   const controller=new AbortController(),stop=()=>controller.abort();process.on('SIGINT',stop);
   console.log('跟踪当前队列，每 5 秒更新；任务结束后在终端和本地桌面提醒。Ctrl+C 返回菜单。');
   try{
@@ -156,15 +156,15 @@ async function panelMenu(client){
     }catch(error){showError(error);if(error.code==='PANEL_ACCESS_DENIED')return;}
   }
 }
-export async function run({remoteConfigPath}={}){
-  if(!remoteConfigPath&&process.argv[2]==='--remote'&&process.argv.length<=4)remoteConfigPath=process.argv[3]||process.env.FO_CONFIG||join(homedir(),'.config','autodl-fo-cli','config.json');
-  if(!remoteConfigPath&&process.argv.length>2){
+export async function run({remoteConfigPath,client:initialClient,sessionDescription}={}){
+  if(!initialClient&&!remoteConfigPath&&process.argv[2]==='--remote'&&process.argv.length<=4)remoteConfigPath=process.argv[3]||process.env.FO_CONFIG||join(homedir(),'.config','autodl-fo-cli','config.json');
+  if(!initialClient&&!remoteConfigPath&&process.argv.length>2){
     if(process.argv[2]==='--help'&&process.argv.length===3){console.log('用法：node cli.mjs 或 node cli.mjs --remote [连接配置.json]\n在终端输入子账号和密码，管理实例、镜像和库存，操作 AutoPanel 目录、网盘传输与完成提醒。执行操作前确认 yes/no，不保存密码或会话。');return;}
     throw Object.assign(new Error('验证版不接收命令行参数；请直接运行 node cli.mjs'),{code:'USAGE'});
   }
   if(!process.stdin.isTTY)throw Object.assign(new Error('请在交互式终端运行 node cli.mjs'),{code:'TTY_REQUIRED'});
   console.log('AutoDL 子账号 HTTP 终端 · 执行操作前确认 yes/no');
-  let client;
+  let client=initialClient;
   if(remoteConfigPath){
     const path=resolve(remoteConfigPath),config=JSON.parse(await readFile(path,'utf8'));
     client=new RemoteClient({request:sshTransport(config,dirname(path))});await client.restore();console.log(`HTTP 后端服务器：${config.host}`);
@@ -174,7 +174,7 @@ export async function run({remoteConfigPath}={}){
     const username=await ask('AutoDL 子账号：');let password=await secret('密码（不回显）：');console.log('正在登录…');
     try{if(client)await client.login(username,password);else{const session=await loginSubaccount({username,password},{baseUrl});client=new WebClient({session,expectedUsername:username,baseUrl});}}finally{password=undefined;}
   }
-  console.log(`当前账号：${client.identity.username}。${remoteConfigPath?'会话仅在服务器内存中，服务重启后需重新登录。':'关闭程序后会话不保留。'}`);
+  console.log(`当前账号：${client.identity.username}。${sessionDescription||(remoteConfigPath?'会话仅在服务器内存中，服务重启后需重新登录。':'关闭程序后会话不保留。')}`);
   for(;;){
     const command=await ask('选择操作 [1 实例列表 / 2 地区库存 / 3 GPU 型号 / 4 AutoPanel / 5 实例管理 / 6 我的镜像 / q 退出]：');
     if(command==='q')return;

@@ -26,7 +26,7 @@ class Terminal:
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         self.process = subprocess.Popen(
-            [shutil.which('node'), str(CLIENT / 'cli.mjs'), *args],
+            [shutil.which('node'), str(CLIENT / 'cli.mjs'), 'remote', *args],
             stdin=slave, stdout=slave, stderr=slave, cwd=CLIENT, env=env,
             preexec_fn=controlling_terminal,
         )

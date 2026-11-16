@@ -4,7 +4,7 @@ import {mkdtemp,readFile,writeFile,rm,stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
-const cli=resolve('cli.mjs');
+const cli=resolve('legacy-cli.mjs');
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'fo-onboarding-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const key=join(dir,'my key');

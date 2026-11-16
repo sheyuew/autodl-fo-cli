@@ -22,7 +22,7 @@ export function sshTransport(config,base){
 export class RemoteClient{
   #request;
   constructor({request}){this.#request=request;}
-  async restore(){const health=await this.#request({op:'doctor'});if(health.backend!=='native-http')throw failure('BACKEND_MISMATCH','服务器尚未切换到 HTTP 版本');if(health.authenticated)this.identity=Object.freeze(health.identity);return health;}
+  async restore(){const health=await this.#request({op:'doctor'});if(health.backend!=='native-http')throw failure('BACKEND_MISMATCH','服务器尚未切换到 HTTP 版本');this.identity=health.authenticated?Object.freeze(health.identity):undefined;return health;}
   async login(username,password){const result=await this.#request({op:'login-password',username,password});if(result.identity?.username!==username)throw failure('ACCOUNT_MISMATCH','服务器登录身份与输入账号不符');this.identity=Object.freeze(result.identity);}
   instances(){return this.#request({op:'instances'});}
   regions(){return this.#request({op:'regions'});}

@@ -25,6 +25,7 @@ export class WebClient{
     this.identity=Object.freeze({id:String(user.uuid||user.id),username,subaccount:!!user.sub_name});
     this.#manager=new InstanceManager({instances:()=>this.instances(),snapshot:id=>this.snapshot(id),read:(op,args)=>this.read(op,args),pages:(op,args)=>this.#pages(op,args),request:(endpoint,body)=>this.#request(endpoint,body)});
   }
+  get authenticated(){return !this.#expired;}
   async read(operation,body){
     if(!Object.hasOwn(endpoints,operation))throw failure('READ_ONLY','验证版只允许读取实例和库存');
     return this.#request(endpoints[operation],body);
