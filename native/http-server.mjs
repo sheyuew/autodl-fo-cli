@@ -41,17 +41,19 @@ class HttpRuntime{
       const plan=await client.prepareInstance('powerOn',policy.instanceUuid);
       return {...plan,machineId:row.machine_id,regionSign:row.region_sign,gpuName:row.snapshot_gpu_alias_name||row.gpu_name,gpuCount:row.req_gpu_amount};
     }
-    const machines=await client.machines({regionSigns:policy.regionSigns,gpuNames:policy.gpuNames,idle:policy.gpuCount});let overBudget,configurationError;
+    const machines=await client.machines({regionSigns:policy.regionSigns,gpuNames:policy.gpuNames,idle:policy.gpuCount});let overBudget,configurationError,hostUnavailable=false;
     for(const m of machines){
       if(!policy.regionSigns.includes(m.region_sign)||!policy.gpuNames.includes(m.gpu_name)||m.gpu_idle_num<policy.gpuCount||[3,4,5,6].includes(m.on_line)||Number.isFinite(m.max_instance_num)&&Number.isFinite(m.binding_instance_num)&&m.max_instance_num<=m.binding_instance_num)continue;
       if(policy.driverVersion!==undefined&&policy.driverVersion!==m.driver_version)continue;
-      let plan;try{plan=await client.prepareProvision(policy.mode,{machineId:m.machine_id,gpuCount:policy.gpuCount,name:policy.name,dataDiskGB:policy.dataDiskGB,imageUuid:policy.imageUuid,imageType:policy.imageType,sourceInstanceUuid:policy.sourceInstanceUuid,copyDataDisk:policy.copyDataDisk,driverVersion:policy.driverVersion});}
-      catch(error){if(error.code==='NO_STOCK')continue;if(['IMAGE_INCOMPATIBLE','IMAGE_REQUIRED','INVALID_REQUEST'].includes(error.code)){configurationError??=error;continue;}throw error;}
-      plan={...plan,...pick(plan.configuration,['machineId','regionSign','gpuName','gpuCount','dataDiskGB','driverVersion']),imageUuid:plan.configuration.image?.imageUuid};
+      let plan;try{plan=await client.prepareProvision(policy.mode,{machineId:m.machine_id,gpuCount:policy.gpuCount,name:policy.name,...(policy.minDataDiskGB===undefined?{dataDiskGB:policy.dataDiskGB}:{minDataDiskGB:policy.minDataDiskGB}),imageUuid:policy.imageUuid,imageType:policy.imageType,sourceInstanceUuid:policy.sourceInstanceUuid,copyDataDisk:policy.copyDataDisk,driverVersion:policy.driverVersion});}
+      catch(error){if(['NO_STOCK','DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH'].includes(error.code)){hostUnavailable=true;continue;}if(['IMAGE_INCOMPATIBLE','IMAGE_REQUIRED'].includes(error.code)){configurationError??=error;continue;}throw error;}
+      const c=plan.configuration;
+      if(!policy.regionSigns.includes(c.regionSign)||!policy.gpuNames.includes(c.gpuName)||c.gpuCount!==policy.gpuCount||policy.driverVersion!==undefined&&c.driverVersion!==policy.driverVersion||policy.minDataDiskGB!==undefined&&c.totalDataDiskGB<policy.minDataDiskGB||policy.minDataDiskGB===undefined&&c.dataDiskGB!==policy.dataDiskGB){hostUnavailable=true;continue;}
+      plan={...plan,...pick(plan.configuration,['machineId','regionSign','gpuName','gpuCount','dataDiskGB','freeDataDiskGB','totalDataDiskGB','driverVersion']),imageUuid:plan.configuration.image?.imageUuid};
       if(plan.quote.totalHourly<=policy.maxHourly)return plan;
       if(!overBudget||plan.quote.totalHourly<overBudget.quote.totalHourly)overBudget=plan;
     }
-    if(overBudget)return overBudget;if(configurationError)throw configurationError;return null;
+    if(overBudget)return overBudget;if(configurationError&&!hostUnavailable)throw configurationError;return null;
   }
   async executeCandidate(plan,policy,authorize){return policy.mode==='powerOn'?this.requireClient().executeInstance(plan.id,{confirmed:true,beforeSubmit:authorize}):this.requireClient().executeProvision(plan.id,{confirmed:true,beforeSubmit:authorize});}
   async observeResult(result){
@@ -97,7 +99,7 @@ class HttpRuntime{
     if(q.op==='instances'||q.op==='catalog'&&q.query==='instances')return (await client.instances()).map(r=>pick(r,['uuid','name','status','charge_type','has_auto_panel','snapshot_gpu_alias_name','gpu_name','req_gpu_amount','region_sign','start_mode']));
     if(q.op==='regions')return client.regions();
     if(q.op==='gpu-types')return (await client.gpuTypes()).map(r=>pick(r,['gpu_name','chip_corp','cpu_arch']));
-    if(q.op==='machines')return (await client.machines(q.args||{})).map(r=>pick(r,['machine_id','gpu_name','region_sign','region_name','gpu_idle_num','gpu_num','gpu_number','driver_version','highest_cuda_version','max_instance_disk_size']));
+    if(q.op==='machines')return (await client.machines(q.args||{})).map(r=>pick(r,['machine_id','gpu_name','region_sign','region_name','gpu_idle_num','gpu_num','gpu_number','driver_version','highest_cuda_version','max_instance_disk_size','max_data_disk_expand_size']));
     if(q.op==='instance-info')return client.instanceInfo(q.instanceUuid);
     if(q.op==='instance-connection')return client.connection(q.instanceUuid,{includeSecrets:q.includeSecrets===true,confirmed:q.confirmed===true});
     if(q.op==='instance-monitor')return client.monitor(q.instanceUuid);
@@ -148,7 +150,7 @@ class HttpRuntime{
 const operations=new Set(['doctor','status','notifications','login-password','instances','regions','gpu-types','machines','catalog','instance-info','instance-connection','instance-monitor','images','image-prepare','image-execute','instance-prepare','instance-execute','provision-catalog','provision-prepare','provision-execute','task-prepare','task-start','task-list','task-info','task-cancel','panel-open','panel-login','panel-read','panel-cloud','panel-transfer','panel-task']);
 const publicCodes=new Set(['LOGIN_REQUIRED','ACCOUNT_MISMATCH','CREDENTIALS_REQUIRED','LOGIN_REJECTED','NETWORK','RATE_LIMITED','API_ERROR','PERMISSION_DENIED','SCHEMA_CHANGED','PANEL_REQUIRED','PANEL_LOGIN_REQUIRED','PANEL_ACCESS_DENIED','PANEL_NOT_INITIALIZED','PANEL_UNAVAILABLE','INVALID_ORIGIN','DISK_REQUIRED','DISK_UNAVAILABLE','DISK_UNSUPPORTED','PATH_REQUIRED','FILE_REQUIRED','CONFIRMATION_REQUIRED','TRANSFER_UNCERTAIN','INSTANCE_REQUIRED','INVALID_REQUEST','READ_ONLY','UNSUPPORTED_OPERATION','STATE_CHANGED','QUOTE_UNAVAILABLE','PLAN_CHANGED','PLAN_EXPIRED','ACTION_UNCERTAIN','TASK_REQUIRED','INVALID_LIMIT','IMAGE_REQUIRED']);
 
-for(const code of ['NO_STOCK','REGION_REQUIRED','IMAGE_INCOMPATIBLE','DISK_SIZE_REQUIRED','DISK_LIMIT','TASK_CONFLICT','SESSION_ENDED','STATE_INVALID'])publicCodes.add(code);
+for(const code of ['NO_STOCK','DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH','REGION_REQUIRED','IMAGE_INCOMPATIBLE','DISK_SIZE_REQUIRED','DISK_LIMIT','TASK_CONFLICT','SESSION_ENDED','STATE_INVALID'])publicCodes.add(code);
 export async function startHttpServer({state,socket,tenantId='owner',baseUrl='https://www.autodl.com',logger=console.log,onRequest,onShutdown,notify}){
   await mkdir(state,{recursive:true,mode:0o700});const runtime=new HttpRuntime({state,tenantId,baseUrl,notify});
   await unlink(socket).catch(e=>{if(e.code!=='ENOENT')throw e;});let tail=Promise.resolve();const connections=new Set();

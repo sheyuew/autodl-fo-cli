@@ -38,11 +38,55 @@ test('no stock and over-budget stock only poll, then a fresh affordable candidat
  await f.clock.advance(10000);assert.equal(f.engine.info(task.id).state,'submitted');assert.equal(submits,1);
 });
 
+test('host disk or configuration changes before submission wait for another fresh candidate',async t=>{
+ for(const code of ['DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH','PLAN_CHANGED']){
+  let attempts=0,accepted=0;
+  const f=await fixture(t,{executeCandidate:async()=>{if(++attempts===1)throw error(code);accepted++;return {accepted:true,instanceUuid:'new-instance'};}}),task=await start(f.engine);
+  await f.clock.advance();assert.equal(f.engine.info(task.id).state,'waiting',code);assert.equal(f.engine.info(task.id).errorCode,code);assert.equal(accepted,0);
+  await f.clock.advance(10000);assert.equal(f.engine.info(task.id).state,'submitted');assert.equal(accepted,1);
+  await f.clock.advance(60000);assert.equal(accepted,1);
+ }
+});
+
 test('policy validation rejects missing budget, ambiguous provisioning, secrets and system disk expansion',async t=>{
  let reads=0;const f=await fixture(t,{prepareCandidate:async()=>{reads++;return null;}});
  for(const change of [{maxHourly:0},{regionSigns:[]},{gpuNames:[]},{gpuCount:0},{dataDiskGB:undefined},{intervalSeconds:9},{maxMinutes:1441},{maxAttempts:10001},{password:'secret'},{mode:'clone',sourceInstanceUuid:''}])await assert.rejects(()=>f.engine.prepare({...policy,...change}),{code:'INVALID_REQUEST'});
  await assert.rejects(()=>f.engine.prepare({...policy,systemDiskGB:50}),{code:'UNSUPPORTED_OPERATION'});
  assert.equal(reads,0);const plan=await f.engine.prepare({mode:'powerOn',instanceUuid:'existing',maxHourly:2});assert.equal(plan.policy.instanceUuid,'existing');
+});
+
+test('minimum total disk consent retains its meaning through fresh candidate checks and stored results',async t=>{
+ const {dataDiskGB,...base}=policy;let reads=0;
+ const f=await fixture(t,{prepareCandidate:async p=>{
+  reads++;assert.equal(p.minDataDiskGB,900);assert.equal(Object.hasOwn(p,'dataDiskGB'),false);
+  return {machineId:456,gpuCount:1,freeDataDiskGB:100,dataDiskGB:800,totalDataDiskGB:900,quote:{totalHourly:2.9}};
+ }});
+ const plan=await f.engine.prepare({...base,minDataDiskGB:900});
+ assert.equal(plan.policy.minDataDiskGB,900);assert.equal(plan.candidate.freeDataDiskGB,100);assert.equal(plan.candidate.dataDiskGB,800);assert.equal(plan.candidate.totalDataDiskGB,900);
+ const task=await f.engine.start(plan.planId,{confirmed:true});await f.clock.advance();
+ assert.equal(reads,2);const stored=JSON.parse(await readFile(join(f.state,'resource-tasks.json'),'utf8')).tasks.find(r=>r.id===task.id);
+ assert.equal(stored.policy.minDataDiskGB,900);assert.equal(stored.candidate.totalDataDiskGB,900);
+});
+
+test('ambiguous or invalid total disk requirements fail before querying a provider',async t=>{
+ let reads=0;const f=await fixture(t,{prepareCandidate:async()=>{reads++;return null;}}),{dataDiskGB,...base}=policy;
+ for(const value of [{...policy,minDataDiskGB:900},...[-1,0,1.5,'900',1000001].map(minDataDiskGB=>({...base,minDataDiskGB}))]){
+  await assert.rejects(()=>f.engine.prepare(value),{code:'INVALID_REQUEST'});
+ }
+ await assert.rejects(()=>f.engine.prepare({mode:'powerOn',instanceUuid:'existing',maxHourly:3,minDataDiskGB:900}),{code:'UNSUPPORTED_OPERATION'});
+ assert.equal(reads,0);
+});
+
+test('an invalid instance name is rejected even when no host currently fits the disk requirement',async t=>{
+ let reads=0;const f=await fixture(t,{prepareCandidate:async()=>{reads++;return null;}});
+ for(const name of ['a'.repeat(33),'测'.repeat(33),'train\x7f'])await assert.rejects(()=>f.engine.prepare({...policy,name}),{code:'INVALID_REQUEST'});
+ assert.equal(reads,0);
+});
+
+test('multiple region and GPU alternatives are preserved and deduplicated without changing the caller',async t=>{
+ const f=await fixture(t,{prepareCandidate:async()=>null}),input={...policy,regionSigns:['west','east','west'],gpuNames:['RTX 4090','RTX 5090','RTX 4090']};
+ const plan=await f.engine.prepare(input);
+ assert.deepEqual(plan.policy.regionSigns,['west','east']);assert.deepEqual(plan.policy.gpuNames,['RTX 4090','RTX 5090']);assert.equal(input.regionSigns.length,3);assert.equal(input.gpuNames.length,3);
 });
 
 test('an expired confirmation and a duplicate active power-on cannot authorize another task',async t=>{

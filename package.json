@@ -1,6 +1,6 @@
 {
   "name": "autodl-fo-cli",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "AutoDL 子账号本地 CLI：抢卡、新建克隆、数据盘扩容与 AutoPanel，支持 Codex 和 JSON 输出",
   "type": "module",

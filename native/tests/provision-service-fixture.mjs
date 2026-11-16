@@ -10,6 +10,7 @@ export async function provisionFixture(t){
  const directory=await mkdtemp(join(tmpdir(),'fo-provision-rpc-')),seen=[],events=[];
  const state={idle:2,price:2200,created:false,sourceStatus:'shutdown'};
  const machine={machine_id:123,region_sign:'west-A',region_name:'West',gpu_name:'RTX 4090',gpu_number:8,on_line:2,max_instance_num:20,binding_instance_num:3,max_instance_disk_size:50*GB,max_data_disk_expand_size:500*GB,chip_corp:'nvidia',cpu_arch:'amd64',driver_version:'550.1',highest_cuda_version:'12.4',rent_mode:''};
+ state.machines=[machine];
  const source={uuid:'source',machine_id:123,name:'source',status:'shutdown',charge_type:'payg',private_image_uuid:'private-1',expand_data_disk_size:10*GB,region_sign:'west-A',req_gpu_amount:1};
  const server=createServer(async(q,r)=>{
   let raw='';for await(const p of q)raw+=p;const body=raw?JSON.parse(raw):{};seen.push({path:q.url,method:q.method,body});let data;
@@ -18,12 +19,12 @@ export async function provisionFixture(t){
   else if(path==='/api/v1/sub_user/passport')data={token:'fixture-private-token-'+body.ticket};
   else if(path==='/api/v1/sub_user/instance'){if(state.instanceGate)await state.instanceGate;data={list:[{...source,status:state.sourceStatus},...(state.created?[{uuid:'created',name:'created',status:'running',machine_id:123,region_sign:'west-A',req_gpu_amount:1}]:[])],result_total:state.created?2:1};}
   else if(path==='/api/v1/sub_user/instance/snapshot')data={image:{image_type:'private',image_name:'Private',chip_corp:'nvidia',cpu_arch:'amd64',cuda_version:'12.1'},expand_system_disk_size:0,expand_data_disk_size:10*GB,machine_info_snapshot:machine};
-  else if(path==='/api/v1/sub_user/user/machine/list')data={list:[{...machine,gpu_idle_num:state.idle,secret_token:'must-not-leak'}],result_total:1};
+  else if(path==='/api/v1/sub_user/user/machine/list'){const list=state.machines.filter(row=>body.machine_id===undefined||String(row.machine_id)===String(body.machine_id)).map(row=>({...row,...(body.machine_id===undefined?{}:state.machineDetails?.[String(body.machine_id)]),gpu_idle_num:row.gpu_idle_num??state.idle,secret_token:'must-not-leak'}));data={list,result_total:list.length};}
   else if(path==='/api/v1/sub_user/region/list')data=[{region_name:'West',region_sign:'west-A',visible:'all',used_for:'all'}];
-  else if(path==='/api/v1/sub_user/machine/gpu_type')data=[{gpu_name:'RTX 4090',gpu_series_type:'NVIDIA-Ada'}];
+  else if(path==='/api/v1/sub_user/machine/gpu_type')data=state.gpuTypes||[{gpu_name:'RTX 4090',gpu_series_type:'NVIDIA-Ada'}];
   else if(path==='/api/v1/sub_user/image/all')data=[{label_name:'PyTorch',children:[{label_name:'2.5',children:[{label_name:'3.12',children:[{label_name:{uuid:'base-1',v:'12.1',chip_corp:'nvidia',cpu_arch:'amd64'}}]}]}]}];
   else if(path==='/api/v1/sub_user/image/private/get')data=[{image_uuid:'private-1',name:'Private',cuda_v:'12.1',chip_corp:'nvidia',cpu_arch:'amd64'}];
-  else if(path==='/api/v1/sub_user/order/price/preview')data={payg_price:state.price,data_disk_info:{data_disk_deal_daily_price:480},prepay_expand_data_disk:false};
+  else if(path==='/api/v1/sub_user/order/price/preview')data={payg_price:state.price,data_disk_info:{data_disk_deal_daily_price:body.expand_data_disk/GB*48},prepay_expand_data_disk:false};
   else if(path==='/api/v1/sub_user/order/data_disk/change/preview')data={max_expand_size:500*GB,data_disk_deal_daily_price:960};
   else if(path==='/api/v1/sub_user/order/data_disk/change')data=null;
   else if(['/api/v1/sub_user/order/instance/create/payg','/api/v1/sub_user/order/instance/clone/payg'].includes(path)){state.created=true;data='created';}

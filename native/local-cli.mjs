@@ -37,6 +37,8 @@ fo provision execute 计划ID --confirm yes --json
 fo task prepare --data 'JSON条件' --json
 fo task start 计划ID --confirm yes --json
   条件：mode=powerOn|create|clone，maxHourly必填；新建/克隆还需地区、GPU、数量及数据盘。
+  regionSigns/gpuNames支持多选；dataDiskGB固定额外付费GB与minDataDiskGB最低总容量GB二选一。
+  新建/克隆跨所选范围主机寻找；已有实例开机绑定原主机，跨主机请用克隆。
   maxMinutes默认60，maxAttempts默认120，intervalSeconds默认30（最少10秒）。
 fo task list --json
 fo task info 任务ID --json

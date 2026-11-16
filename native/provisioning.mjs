@@ -24,8 +24,8 @@ function flattenBase(tree){
 }
 function available(machine,count){
  if([3,4,5,6].includes(machine.on_line)||!Number.isFinite(machine.gpu_idle_num)||machine.gpu_idle_num<count||Number.isFinite(machine.max_instance_num)&&Number.isFinite(machine.binding_instance_num)&&machine.max_instance_num<=machine.binding_instance_num)throw fail('NO_STOCK','所选主机维护中、空闲 GPU 不足或实例数已满');
- if(Number.isFinite(machine.gpu_number)&&count>machine.gpu_number)throw fail('INVALID_REQUEST','GPU 数量超过主机总卡数');
- if(machine.rent_mode){const match=/^(Base|Unit)(\d+)$/.exec(machine.rent_mode);if(!match)throw fail('UNSUPPORTED_OPERATION','主机租用卡数规则发生变化，请重新选择');const n=Number(match[2]);if(!n)throw fail('SCHEMA_CHANGED','主机租用卡数规则不可用');if(machine.gpu_idle_num>=n&&(match[1]==='Base'?count<n:count%n!==0))throw fail('INVALID_REQUEST','GPU 数量不符合主机起租或成组租用限制');}
+ if(Number.isFinite(machine.gpu_number)&&count>machine.gpu_number)throw fail('HOST_CONFIG_MISMATCH','GPU 数量超过主机总卡数');
+ if(machine.rent_mode){const match=/^(Base|Unit)(\d+)$/.exec(machine.rent_mode);if(!match)throw fail('UNSUPPORTED_OPERATION','主机租用卡数规则发生变化，请重新选择');const n=Number(match[2]);if(!n)throw fail('SCHEMA_CHANGED','主机租用卡数规则不可用');if(machine.gpu_idle_num>=n&&(match[1]==='Base'?count<n:count%n!==0))throw fail('HOST_CONFIG_MISMATCH','GPU 数量不符合主机起租或成组租用限制');}
 }
 /** Account-scoped ordinary-container pay-as-you-go creation and clone plans. */
 export class ProvisioningManager{
@@ -43,11 +43,13 @@ export class ProvisioningManager{
   if(!['create','clone'].includes(mode))throw fail('UNSUPPORTED_OPERATION','只支持新建或克隆普通容器实例');
   if(args.chargeType!==undefined&&args.chargeType!=='payg')throw fail('UNSUPPORTED_OPERATION','当前新建和克隆只支持按量计费');
   if(args.systemDiskGB!==undefined&&args.systemDiskGB!==0)throw fail('UNSUPPORTED_OPERATION','普通容器不支持系统盘扩容；Pro 使用独立接口，当前不混用');
-  const gpuCount=integer(args.gpuCount,'GPU 数量',{min:1,max:1024}),dataDiskGB=integer(args.dataDiskGB??0,'额外付费数据盘 GB'),machine=await this.#machine(args.machineId);available(machine,gpuCount);
-  const expand=dataDiskGB*GB;if(!Number.isSafeInteger(machine.max_instance_disk_size)||machine.max_instance_disk_size<0||!Number.isSafeInteger(machine.max_data_disk_expand_size)||machine.max_data_disk_expand_size<0)throw fail('SCHEMA_CHANGED','主机缺少可验证的免费数据盘容量或扩容上限');
-  if(expand>machine.max_data_disk_expand_size)throw fail('INVALID_REQUEST','额外数据盘容量超过所选主机的扩容上限');
-  if(args.driverVersion!==undefined&&args.driverVersion!==machine.driver_version)throw fail('INVALID_REQUEST','驱动由所选主机决定，不能在创建请求中更换主机驱动');
-  const instance={machine_id:machine.machine_id,charge_type:'payg',req_gpu_amount:gpuCount,base_image_uuid:'',private_image_uuid:'',reproduction_uuid:'',cg_application_uuid:'',cg_application_info:{image_name:'',current_version_id:0,current_version:'',image_id:0},instance_name:instanceName(args.name),expand_data_disk:expand};
+  if(args.dataDiskGB!==undefined&&args.minDataDiskGB!==undefined)throw fail('INVALID_REQUEST','固定额外付费数据盘与最低总容量只能选择一种');
+  const gpuCount=integer(args.gpuCount,'GPU 数量',{min:1,max:1024}),minimum=args.minDataDiskGB===undefined?undefined:integer(args.minDataDiskGB,'最低数据盘总容量 GB',{min:1,max:1000000}),fixedDisk=minimum===undefined?integer(args.dataDiskGB??0,'额外付费数据盘 GB',{max:1000000}):undefined,name=instanceName(args.name),machine=await this.#machine(args.machineId);available(machine,gpuCount);
+  if(!Number.isSafeInteger(machine.max_instance_disk_size)||machine.max_instance_disk_size<0||!Number.isSafeInteger(machine.max_data_disk_expand_size)||machine.max_data_disk_expand_size<0)throw fail('SCHEMA_CHANGED','主机缺少可验证的免费数据盘容量或扩容上限');
+  let dataDiskGB=minimum===undefined?fixedDisk:Math.max(0,Math.ceil(minimum-machine.max_instance_disk_size/GB)),expand=dataDiskGB*GB;
+  if(expand>machine.max_data_disk_expand_size)throw fail('DATA_DISK_UNAVAILABLE','额外数据盘容量超过所选主机的扩容上限');
+  if(args.driverVersion!==undefined&&args.driverVersion!==machine.driver_version)throw fail('HOST_CONFIG_MISMATCH','驱动由所选主机决定，不能在创建请求中更换主机驱动');
+  const instance={machine_id:machine.machine_id,charge_type:'payg',req_gpu_amount:gpuCount,base_image_uuid:'',private_image_uuid:'',reproduction_uuid:'',cg_application_uuid:'',cg_application_info:{image_name:'',current_version_id:0,current_version:'',image_id:0},instance_name:name,expand_data_disk:expand};
   const body={instance_info:instance,price_info:{coupon_id_list:[],machine_id:machine.machine_id,charge_type:'payg',duration:1,num:gpuCount,expand_data_disk:expand}};let image,sourceFingerprint,source;
   if(mode==='create'){
    if(!['base','private'].includes(args.imageType??'base'))throw fail('UNSUPPORTED_OPERATION','当前新建支持基础镜像和当前账号可用的私有镜像');
@@ -64,7 +66,16 @@ export class ProvisioningManager{
    if(!instance.base_image_uuid&&!instance.private_image_uuid&&!instance.reproduction_uuid&&!instance.cg_application_uuid)throw fail('IMAGE_REQUIRED','源实例没有可验证的镜像引用，暂不能克隆');
    if(args.copyDataDisk!==undefined&&typeof args.copyDataDisk!=='boolean')throw fail('INVALID_REQUEST','是否拷贝数据盘必须为 true 或 false');
    instance.copy_data_disk_after_clone=args.copyDataDisk===true;instance.keep_src_user_service_address_after_clone=false;instance.ft_sparse=false;body.instance_uuid=row.uuid;
-   if(instance.copy_data_disk_after_clone){const sourceFree=snapshot.machine_info_snapshot?.max_instance_disk_size,sourceExpand=snapshot.expand_data_disk_size??row.expand_data_disk_size??0;if(!Number.isSafeInteger(sourceFree)||!Number.isSafeInteger(sourceExpand))throw fail('SCHEMA_CHANGED','无法验证源实例的数据盘容量');if(machine.max_instance_disk_size+expand<sourceFree+sourceExpand)throw fail('INVALID_REQUEST','拷贝数据盘时目标总容量不得小于源数据盘总容量');}
+   if(instance.copy_data_disk_after_clone){
+    const sourceFree=snapshot.machine_info_snapshot?.max_instance_disk_size,sourceExpand=snapshot.expand_data_disk_size??row.expand_data_disk_size??0;
+    if(!Number.isSafeInteger(sourceFree)||!Number.isSafeInteger(sourceExpand))throw fail('SCHEMA_CHANGED','无法验证源实例的数据盘容量');
+    if(minimum!==undefined){
+     dataDiskGB=Math.max(0,Math.ceil((Math.max(minimum*GB,sourceFree+sourceExpand)-machine.max_instance_disk_size)/GB));expand=dataDiskGB*GB;
+     if(expand>machine.max_data_disk_expand_size)throw fail('DATA_DISK_UNAVAILABLE','额外数据盘容量超过所选主机的扩容上限');
+     instance.expand_data_disk=expand;body.price_info.expand_data_disk=expand;
+    }
+    if(machine.max_instance_disk_size+expand<sourceFree+sourceExpand)throw fail('DATA_DISK_UNAVAILABLE','拷贝数据盘时目标总容量不得小于源数据盘总容量');
+   }
    source={uuid:row.uuid,name:row.name,status:row.status,copyDataDisk:instance.copy_data_disk_after_clone};sourceFingerprint=JSON.stringify({row:pick(row,['uuid','status','charge_type','private_image_uuid','reproduction_uuid','reproduction_id','expand_data_disk_size']),image:info,cg_application_uuid:snapshot.cg_application_uuid,cg_application_info:instance.cg_application_info,expand_data_disk_size:snapshot.expand_data_disk_size,expand_system_disk_size:snapshot.expand_system_disk_size,freeDataDisk:snapshot.machine_info_snapshot?.max_instance_disk_size});
   }
   compatible(image,machine);

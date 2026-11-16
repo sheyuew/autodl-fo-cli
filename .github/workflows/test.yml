@@ -15,4 +15,5 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      - run: npm run test:native
       - run: npm run test:terminal

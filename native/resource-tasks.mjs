@@ -5,9 +5,9 @@ import {join} from 'node:path';
 const fail=(code,message)=>Object.assign(new Error(message),{code});
 const activeStates=new Set(['waiting','quoting','submitting','verifying']);
 const terminalStates=new Set(['submitted','completed','paused','uncertain','cancelled','expired','failed']);
-const policyKeys=new Set(['mode','name','instanceUuid','sourceInstanceUuid','regionSigns','gpuNames','gpuCount','imageUuid','imageType','driverVersion','dataDiskGB','systemDiskGB','copyDataDisk','maxHourly','intervalSeconds','maxMinutes','maxAttempts']);
-const permanentCodes=new Set(['PERMISSION_DENIED','QUOTA_EXCEEDED','INSTANCE_LIMIT','INSTANCE_LIMIT_EXCEEDED','LOGIN_REQUIRED','LOGIN_REJECTED','ACCOUNT_MISMATCH','UNSUPPORTED_OPERATION','INVALID_REQUEST','STATE_CHANGED','PLAN_CHANGED','SCHEMA_CHANGED','IMAGE_REQUIRED','IMAGE_INCOMPATIBLE','DISK_LIMIT','DISK_SIZE_REQUIRED']);
-const knownCodes=new Set([...permanentCodes,'NETWORK','ACTION_UNCERTAIN','NO_STOCK','STOCK_UNAVAILABLE','RATE_LIMITED','API_ERROR','QUOTE_UNAVAILABLE','PLAN_EXPIRED']);
+const policyKeys=new Set(['mode','name','instanceUuid','sourceInstanceUuid','regionSigns','gpuNames','gpuCount','imageUuid','imageType','driverVersion','dataDiskGB','minDataDiskGB','systemDiskGB','copyDataDisk','maxHourly','intervalSeconds','maxMinutes','maxAttempts']);
+const permanentCodes=new Set(['PERMISSION_DENIED','QUOTA_EXCEEDED','INSTANCE_LIMIT','INSTANCE_LIMIT_EXCEEDED','LOGIN_REQUIRED','LOGIN_REJECTED','ACCOUNT_MISMATCH','UNSUPPORTED_OPERATION','INVALID_REQUEST','STATE_CHANGED','SCHEMA_CHANGED','IMAGE_REQUIRED','IMAGE_INCOMPATIBLE','DISK_LIMIT','DISK_SIZE_REQUIRED']);
+const knownCodes=new Set([...permanentCodes,'NETWORK','ACTION_UNCERTAIN','NO_STOCK','STOCK_UNAVAILABLE','RATE_LIMITED','API_ERROR','QUOTE_UNAVAILABLE','PLAN_EXPIRED','PLAN_CHANGED','DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH']);
 const copy=value=>JSON.parse(JSON.stringify(value));
 const text=value=>typeof value==='string'&&value.trim().length>0&&value.length<=200&&!/[\x00-\x1f]/.test(value);
 const integer=(value,min,max=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(value)&&value>=min&&value<=max;
@@ -21,11 +21,15 @@ function normalizePolicy(value){
  if(!positive(p.intervalSeconds)||p.intervalSeconds<10||!positive(p.maxMinutes,1440)||!integer(p.maxAttempts,1,10000))throw fail('INVALID_REQUEST','轮询间隔至少10秒，时长最多1440分钟，次数最多10000次');
  if(p.systemDiskGB!==0)throw fail('UNSUPPORTED_OPERATION','此版本不执行系统盘扩容，请使用0');
  for(const k of ['name','instanceUuid','sourceInstanceUuid','imageUuid','driverVersion'])if(p[k]!==undefined&&!text(p[k]))throw fail('INVALID_REQUEST','策略名称或实例参数无效');
+ if(p.name!==undefined&&(Array.from(p.name.trim()).length>32||/\x7f/.test(p.name)))throw fail('INVALID_REQUEST','实例名称最多 32 个字符，不能包含控制字符');
  for(const k of ['regionSigns','gpuNames'])if(p[k]!==undefined&&(!Array.isArray(p[k])||p[k].length>100||p[k].some(v=>!text(v))))throw fail('INVALID_REQUEST','请选择有效的地区和显卡');
+ for(const k of ['regionSigns','gpuNames'])if(p[k]!==undefined)p[k]=[...new Set(p[k])];
  if(p.mode==='powerOn'){
   if(!text(p.instanceUuid))throw fail('INVALID_REQUEST','开机模式需要指定实例');
+  if(p.minDataDiskGB!==undefined)throw fail('UNSUPPORTED_OPERATION','已有实例开机使用原主机和原数据盘；跨主机匹配数据盘容量请使用克隆模式');
  }else{
-  if(!p.regionSigns?.length||!p.gpuNames?.length||!integer(p.gpuCount,1,64)||!integer(p.dataDiskGB,0,1000000))throw fail('INVALID_REQUEST','新建或克隆需明确地区、显卡、卡数和数据盘容量');
+  const fixedDisk=p.dataDiskGB!==undefined,minimumDisk=p.minDataDiskGB!==undefined;
+  if(!p.regionSigns?.length||!p.gpuNames?.length||!integer(p.gpuCount,1,64)||fixedDisk===minimumDisk||fixedDisk&&!integer(p.dataDiskGB,0,1000000)||minimumDisk&&!integer(p.minDataDiskGB,1,1000000))throw fail('INVALID_REQUEST','新建或克隆需明确地区、显卡、卡数；数据盘需二选一：固定额外付费 GB 或最低总容量 GB');
   if(p.mode==='create'&&!text(p.imageUuid)||p.mode==='clone'&&!text(p.sourceInstanceUuid))throw fail('INVALID_REQUEST','请选择镜像或克隆源实例');
   if(p.copyDataDisk!==undefined&&typeof p.copyDataDisk!=='boolean')throw fail('INVALID_REQUEST','复制数据盘选项应为布尔值');
   if(p.mode==='clone')p.copyDataDisk??=false;
@@ -38,6 +42,7 @@ function candidateSummary(candidate){
  for(const key of ['instanceUuid','sourceInstanceUuid','machineId','regionSign','gpuName','imageUuid','driverVersion'])if(text(candidate[key]))result[key]=candidate[key];
  if(integer(candidate.machineId,0))result.machineId=candidate.machineId;
  for(const key of ['gpuCount','dataDiskGB','systemDiskGB'])if(integer(candidate[key],0))result[key]=candidate[key];
+ for(const key of ['freeDataDiskGB','totalDataDiskGB'])if(positive(candidate[key])||candidate[key]===0)result[key]=candidate[key];
  if(candidate.quote&&typeof candidate.quote==='object'){
   const quote={};if(typeof candidate.quote.currency==='string'&&/^[A-Z]{3}$/.test(candidate.quote.currency))quote.currency=candidate.quote.currency;
   for(const key of ['computeHourly','dataDiskDaily','systemDiskDaily','storageDaily','totalHourly'])if(positive(candidate.quote[key])||candidate.quote[key]===0)quote[key]=candidate.quote[key];
@@ -167,7 +172,7 @@ export class ResourceTasks {
    catch(error){
     if(error.code==='TASK_STOPPED'&&(this.#closing||task.cancelRequested)){this.#change(task,'waiting');return;}
     if(error.code==='TIME_EXPIRED'&&this.now()>=Date.parse(task.deadlineAt))return await this.#finish(task,'expired','TIME_EXPIRED');
-    const code=codeOf(error);if(isPermanent(error))return await this.#finish(task,'failed',code);if(['NO_STOCK','STOCK_UNAVAILABLE','RATE_LIMITED','PLAN_CHANGED','PLAN_EXPIRED'].includes(code))return await this.#wait(task,code,error);return await this.#finish(task,'uncertain',code==='ENGINE_ERROR'?'ACTION_UNCERTAIN':code);
+    const code=codeOf(error);if(isPermanent(error))return await this.#finish(task,'failed',code);if(['NO_STOCK','STOCK_UNAVAILABLE','RATE_LIMITED','PLAN_CHANGED','PLAN_EXPIRED','DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH'].includes(code))return await this.#wait(task,code,error);return await this.#finish(task,'uncertain',code==='ENGINE_ERROR'?'ACTION_UNCERTAIN':code);
    }
    if(result?.accepted!==true)return await this.#finish(task,'uncertain','ACTION_UNCERTAIN');
    task.submitted=true;if(text(result.instanceUuid))task.instanceUuid=result.instanceUuid;

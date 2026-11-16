@@ -6,6 +6,17 @@ async function choose(rows,prompt,label,{ask}){
  choices(rows,label);
  for(;;){const answer=await ask(prompt+'（q 返回）：');if(answer==='q')return;const index=Number(answer)-1;if(Number.isInteger(index)&&rows[index])return rows[index];console.log('请选择列表中的编号。');}
 }
+async function chooseMany(rows,prompt,label,{ask}){
+ if(!rows.length){console.log('当前没有可选项目，请查询其他条件。');return;}
+ choices(rows,label);
+ for(;;){
+  const answer=(await ask(prompt+'（逗号分隔多选，all/a/全选，q 返回）：')).trim();if(answer==='q')return;
+  if(['all','a','全选'].includes(answer.toLowerCase()))return rows;
+  const parts=answer.split(/[,，]/).map(value=>value.trim());
+  if(parts.every(value=>/^[1-9]\d*$/.test(value)&&rows[Number(value)-1]))return [...new Set(parts.map(value=>Number(value)-1))].map(index=>rows[index]);
+  console.log('请输入列表中的编号，多个编号用逗号分隔，或输入 all 全选。');
+ }
+}
 async function number(prompt,{ask},{min=0,max=Number.MAX_SAFE_INTEGER,integer=true}={}){
  for(;;){const text=await ask(prompt+'（q 返回）：');if(text==='q')return;const n=Number(text);if(text!==''&&Number.isFinite(n)&&n>=min&&n<=max&&(!integer||Number.isSafeInteger(n)))return n;console.log(min===Number.MIN_VALUE?'请输入大于 0 的数字。':`请输入${integer?'整数':'数字'}，范围 ${min}～${max}。`);}
 }
@@ -21,18 +32,27 @@ export function printQuote(q){
  if(Number.isFinite(q.totalHourly))console.log(`运行总计折合：¥${q.totalHourly.toFixed(3)}/小时。`);
  console.log('存储按平台原计费周期结算，关机后仍可能收费。');
 }
-async function location(client,io){
- const region=await choose((await client.regions()).filter(r=>r.visible==='all'&&r.used_for==='all'),'选择地区编号',r=>`${r.region_name} (${r.region_sign})`,io);if(!region)return;
- const gpu=await choose((await client.gpuTypes()).filter(g=>g.chip_corp!=='cpu'),'选择 GPU 型号编号',g=>g.gpu_name,io);if(!gpu)return;
+async function location(client,io,{multiple=false}={}){
+ const select=multiple?chooseMany:async(...args)=>{const row=await choose(...args);return row?[row]:undefined;};
+ const regions=await select((await client.regions()).filter(r=>r.visible==='all'&&r.used_for==='all'),'选择地区编号',r=>`${r.region_name} (${r.region_sign})`,io);if(!regions)return;
+ const gpus=await select((await client.gpuTypes()).filter(g=>g.chip_corp!=='cpu'),'选择 GPU 型号编号',g=>g.gpu_name,io);if(!gpus)return;
  const gpuCount=await number('GPU 卡数',io,{min:1,max:64});if(gpuCount===undefined)return;
- return {regionSigns:[region.region_sign],gpuNames:[gpu.gpu_name],gpuCount};
+ return {regionSigns:regions.map(region=>region.region_sign),gpuNames:gpus.map(gpu=>gpu.gpu_name),gpuCount};
 }
 async function provisioningArgs(client,mode,io,{monitor=false}={}){
- const conditions=await location(client,io);if(!conditions)return;
- const machines=monitor?await client.machines({...conditions,idle:0}):(await client.provisionCatalog(conditions)).machines;
- if(monitor)console.log('选择参考主机获取兼容镜像；抢卡会在所选地区和 GPU 型号内匹配可用主机。');
- const machine=await choose(machines,'选择主机编号',m=>`${m.region_name||m.region_sign} / ${m.gpu_name} / 空闲 ${m.gpu_idle_num} 卡 / 免费数据盘 ${Number(m.max_instance_disk_size)/(1024**3)} GB / 驱动 ${m.driver_version||'—'} / 主机 ${m.machine_id}`,io);if(!machine)return;
- const args={machineId:machine.machine_id,gpuCount:conditions.gpuCount};
+ const conditions=await location(client,io,{multiple:monitor});if(!conditions)return;
+ let machine;
+ if(monitor){
+  console.log('新建/克隆会在所选范围内匹配全部候选主机，不绑定某一台主机。');
+  if(mode==='create'){
+   machine=(await client.machines({...conditions,idle:0})).find(row=>conditions.regionSigns.includes(row.region_sign)&&conditions.gpuNames.includes(row.gpu_name));
+   if(!machine){console.log('所选范围暂无主机目录，无法读取可选镜像，请调整范围后重试。');return;}
+   console.log('自动读取所选范围的镜像目录；抢卡时会逐主机检验所选镜像的兼容性。');
+  }
+ }else{
+  machine=await choose((await client.provisionCatalog(conditions)).machines,'选择主机编号',m=>`${m.region_name||m.region_sign} / ${m.gpu_name} / 空闲 ${m.gpu_idle_num} 卡 / 免费数据盘 ${Number(m.max_instance_disk_size)/(1024**3)} GB / 驱动 ${m.driver_version||'—'} / 主机 ${m.machine_id}`,io);if(!machine)return;
+ }
+ const args={...(monitor?{}:{machineId:machine.machine_id}),gpuCount:conditions.gpuCount};
  if(mode==='create'){
   const catalog=await client.provisionCatalog({machineId:machine.machine_id,gpuCount:conditions.gpuCount});
   const type=await choose([{type:'base',name:'基础镜像'},{type:'private',name:'当前账号可用的私有镜像'}],'选择镜像类型编号',r=>r.name,io);if(!type)return;
@@ -43,8 +63,17 @@ async function provisioningArgs(client,mode,io,{monitor=false}={}){
   args.sourceInstanceUuid=source.uuid;
   const copy=await yesNo('是否同时复制源实例数据盘',io);if(copy===undefined)return;args.copyDataDisk=copy;
  }
- console.log('额外数据盘是付费扩容总量，基础免费容量另计；0 表示只用免费数据盘。');
- args.dataDiskGB=await number('额外付费数据盘 GB',io,{max:100000});if(args.dataDiskGB===undefined)return;
+ let diskMode='extra';
+ if(monitor){
+  const disk=await choose([{mode:'extra',label:'固定额外付费容量（免费容量另计）'},{mode:'minimum',label:'最低数据盘总容量（免费容量 + 付费扩容）'}],'选择数据盘条件编号',row=>row.label,io);if(!disk)return;diskMode=disk.mode;
+ }
+ if(diskMode==='minimum'){
+  console.log('按各主机免费容量自动计算满足最低总容量所需的最少额外付费容量；计算和存储费用仍须符合完整费用上限。');
+  args.minDataDiskGB=await number('最低数据盘总容量 GB',io,{min:1,max:1000000});if(args.minDataDiskGB===undefined)return;
+ }else{
+  console.log('额外数据盘是付费扩容总量，基础免费容量另计；0 表示只用免费数据盘。');
+  args.dataDiskGB=await number('额外付费数据盘 GB',io,{max:100000});if(args.dataDiskGB===undefined)return;
+ }
  args.name=await io.ask('新实例名称（回车使用平台默认名称，q 返回）：');if(args.name==='q')return;
  return {args,conditions};
 }
@@ -65,6 +94,7 @@ async function taskPolicy(client,io){
  let policy={mode:choice.mode};
  if(choice.mode==='powerOn'){
   const row=await choose((await client.instances()).filter(r=>stopped.has(r.status)&&r.charge_type==='payg'),'选择等待开机实例编号',r=>`${r.name||r.uuid} (${r.uuid})`,io);if(!row)return;policy.instanceUuid=row.uuid;
+  console.log('已有实例开机绑定该实例原主机，不会切换到其他主机。');
  }else{
   const selected=await provisioningArgs(client,choice.mode,io,{monitor:true});if(!selected)return;
   const {machineId,...args}=selected.args;policy={...policy,...selected.conditions,...args};
@@ -87,6 +117,7 @@ export async function resourceMenu(client,io){
    if(command==='1'){
     const policy=await taskPolicy(client,io);if(!policy)continue;
     const plan=await client.prepareTask(policy);console.log('抢卡条件与费用边界：');console.dir(plan.policy,{depth:6});if(plan.candidate){console.log('当前候选（执行前仍会重新核价）：');console.dir(plan.candidate,{depth:5});}
+    if(policy.mode!=='powerOn')console.log('地区与 GPU 型号多选表示各自列表中的任一项（OR）；GPU 卡数须由同一主机满足。每个任务只获取一次，不会同时租下所有选项。');
     console.log(`完整运行费用最多 ¥${policy.maxHourly}/小时；最多监控 ${policy.maxMinutes} 分钟、检查 ${policy.maxAttempts} 次，每 ${policy.intervalSeconds} 秒检查。每个任务仅成功提交一次。`);
     console.log('监控时长不是租用时长；抢到后不会自动关机，会继续按平台规则计费。数据盘关机后仍可能收费。');
     if(!await io.confirm()){console.log('已取消。');continue;}

@@ -130,13 +130,23 @@ bash ./fo instance execute PLAN_ID --confirm yes --json
 
 ## 自动抢卡与结果通知
 
-自动任务是一段有明确边界的付费授权。先按用户意图确定模式、原实例或地区/GPU 数量、镜像或克隆源、额外数据盘、最高总时价、监控时限和次数，得到完整预览后再要求最终 yes/no。先查 `task list`，同一目标已有活动任务时继续查询它，避免重复授权。
+自动任务是一段有明确边界的付费授权。先按用户意图确定模式、原实例或地区/GPU 数量、镜像或克隆源、数据盘条件、最高总时价、监控时限和次数，得到完整预览后再要求最终 yes/no。先查 `task list`，同一目标已有活动任务时继续查询它，避免重复授权。
 
 新建任务示例，先把地区、GPU 和镜像换成真实目录值：
 
 ```bash
 bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A"],"gpuNames":["GPU_NAME"],"gpuCount":1,"imageUuid":"IMAGE_UUID","imageType":"base","name":"实验实例","dataDiskGB":100,"maxHourly":3,"maxMinutes":60,"maxAttempts":120,"intervalSeconds":30}' --json
 ```
+
+`regionSigns` 和 `gpuNames` 可分别填多个真实目录值，分别表示任意地区、任意型号，组合匹配；卡数仍是同一主机上的数量，任务最多获取一个实例。新建/克隆在整个所选范围内寻找，不绑定镜像目录使用的参考主机。主菜单 8 同样支持多选，可输入 `1,3` 或 `all`。
+
+数据盘条件必须二选一：`dataDiskGB` 固定额外付费容量，或 `minDataDiskGB` 最低总容量。最低总容量按各主机免费容量计算最少额外付费 GB，仍受 `maxHourly` 完整费用上限约束；例如免费 100 GB、最低总量 900 GB 时实际付费扩容 800 GB。采用最低总量时省略 `dataDiskGB`：
+
+```bash
+bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A","REGION_B"],"gpuNames":["GPU_A","GPU_B"],"gpuCount":1,"imageUuid":"IMAGE_UUID","imageType":"base","minDataDiskGB":900,"maxHourly":5,"maxMinutes":60,"maxAttempts":120,"intervalSeconds":30}' --json
+```
+
+展示策略中的磁盘含义，以及当前候选的免费、额外付费、总容量。最低总量模式下，若克隆且复制数据盘，实际容量取用户最低值与完整源盘容量中的较大者，再计算最少付费扩容；固定额外容量模式保持用户指定值。磁盘扩容上限或主机起租卡数不满足时跳过主机；当前全部不满足时保持等待。提交前配置或报价变动时，任务在已确认策略范围内重新匹配和核价。目录查询没有预留库存，不能保证平台最终成功分配。
 
 克隆使用 `mode:"clone"`、`sourceInstanceUuid`，明确 `copyDataDisk`；原实例开机使用 `mode:"powerOn"` 和 `instanceUuid`，目标绑定该实例的现有主机/地区/GPU 与磁盘配置。三种模式都需 `maxHourly`；它包含计算时费和存储日费折算，不只是单卡报价。间隔至少 10 秒，默认 30 秒；默认最多 60 分钟、120 次，实际停止以先达到的限制为准。
 
