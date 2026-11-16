@@ -35,9 +35,14 @@ export function printQuote(q){
 async function location(client,io,{multiple=false}={}){
  const select=multiple?chooseMany:async(...args)=>{const row=await choose(...args);return row?[row]:undefined;};
  const regions=await select((await client.regions()).filter(r=>r.visible==='all'&&r.used_for==='all'),'选择地区编号',r=>`${r.region_name} (${r.region_sign})`,io);if(!regions)return;
- const gpus=await select((await client.gpuTypes()).filter(g=>g.chip_corp!=='cpu'),'选择 GPU 型号编号',g=>g.gpu_name,io);if(!gpus)return;
+ const gpus=await select((await client.gpuTypes()).filter(g=>g.chip_corp!=='cpu'&&!/^CPU(?:-|$)/i.test(g.gpu_name)),'选择 GPU 型号编号',g=>g.gpu_name,io);if(!gpus)return;
  const gpuCount=await number('GPU 卡数',io,{min:1,max:64});if(gpuCount===undefined)return;
- return {regionSigns:regions.map(region=>region.region_sign),gpuNames:gpus.map(gpu=>gpu.gpu_name),gpuCount};
+ let minGpuMemoryGB;
+ if(multiple){
+  console.log('最低显存按每张 GPU 计算，不是多张卡显存相加；0 表示不限制。');
+  minGpuMemoryGB=await number('每张 GPU 最低显存 GB（0 不限制）',io,{max:10000});if(minGpuMemoryGB===undefined)return;
+ }
+ return {regionSigns:regions.map(region=>region.region_sign),gpuNames:gpus.map(gpu=>gpu.gpu_name),gpuCount,...(minGpuMemoryGB>0?{minGpuMemoryGB}:{})};
 }
 async function provisioningArgs(client,mode,io,{monitor=false}={}){
  const conditions=await location(client,io,{multiple:monitor});if(!conditions)return;
@@ -123,7 +128,7 @@ export async function resourceMenu(client,io){
     if(!await io.confirm()){console.log('已取消。');continue;}
     const task=await client.startTask(plan.planId,{confirmed:true});console.log(`本机后台任务已启动：${task.id}，状态 ${task.state}。关闭此菜单不停止任务；电脑和网络需保持在线。通过任务列表查看结果。`);
    }else if(command==='2'){
-    const rows=await client.tasks();console.table(rows.map(r=>({任务:r.id,模式:r.policy?.mode,名称:r.policy?.name||r.policy?.instanceUuid||r.policy?.sourceInstanceUuid||'—',状态:r.state,已提交:r.submitted,错误码:r.errorCode||'—'})));console.log(`共 ${rows.length} 个本地任务。`);
+    const rows=await client.tasks();console.table(rows.map(r=>({任务:r.id,模式:r.policy?.mode,名称:r.policy?.name||r.policy?.instanceUuid||r.policy?.sourceInstanceUuid||'—',状态:r.state,已提交:r.submitted,错误码:r.errorCode||'—',平台码:r.errorDetail?.providerCode||'—'})));console.log(`共 ${rows.length} 个本地任务。`);
    }else if(command==='3'){
     const task=await selectedTask(client,io);if(task)console.dir(await client.taskInfo(task.id),{depth:6});
    }else if(command==='4'){

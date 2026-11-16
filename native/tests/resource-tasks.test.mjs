@@ -89,6 +89,18 @@ test('multiple region and GPU alternatives are preserved and deduplicated withou
  assert.deepEqual(plan.policy.regionSigns,['west','east']);assert.deepEqual(plan.policy.gpuNames,['RTX 4090','RTX 5090']);assert.equal(input.regionSigns.length,3);assert.equal(input.gpuNames.length,3);
 });
 
+test('minimum per-GPU memory stays in the confirmed policy and candidate output',async t=>{
+ const f=await fixture(t,{prepareCandidate:async p=>{assert.equal(p.minGpuMemoryGB,32);return {gpuCount:2,gpuMemoryGB:48,quote:{totalHourly:2}};}});
+ const p=await f.engine.prepare({...policy,gpuCount:2,minGpuMemoryGB:32});assert.equal(p.policy.minGpuMemoryGB,32);assert.equal(p.candidate.gpuMemoryGB,48);
+ const task=await f.engine.start(p.planId,{confirmed:true});await f.clock.advance();assert.equal(f.engine.info(task.id).candidate.gpuMemoryGB,48);
+});
+
+test('invalid GPU-memory requirements and fixed-instance filters fail before provider queries',async t=>{
+ let reads=0;const f=await fixture(t,{prepareCandidate:async()=>{reads++;return null;}});
+ for(const minGpuMemoryGB of [0,-1,1.5,'32',10001])await assert.rejects(()=>f.engine.prepare({...policy,minGpuMemoryGB}),{code:'INVALID_REQUEST'});
+ await assert.rejects(()=>f.engine.prepare({mode:'powerOn',instanceUuid:'existing',maxHourly:3,minGpuMemoryGB:32}),{code:'UNSUPPORTED_OPERATION'});assert.equal(reads,0);
+});
+
 test('an expired confirmation and a duplicate active power-on cannot authorize another task',async t=>{
  const f=await fixture(t,{prepareCandidate:async()=>null}),p={mode:'powerOn',instanceUuid:'existing',maxHourly:2};
  const old=await f.engine.prepare(p);await f.clock.advance(120001);await assert.rejects(()=>f.engine.start(old.planId,{confirmed:true}),{code:'PLAN_EXPIRED'});
@@ -181,6 +193,27 @@ test('explicit business rejections fail without misreporting an uncertain purcha
   let calls=0;const f=await fixture(t,{prepareCandidate:async()=>{if(stage==='prepare'&&++calls>1)throw error('API_ERROR');return {quote:{totalHourly:2}};},executeCandidate:async()=>{throw error('API_ERROR');}}),task=await start(f.engine);
   await f.clock.advance();assert.equal(f.engine.info(task.id).state,'failed');assert.equal(f.engine.info(task.id).errorCode,'API_ERROR');
  }
+});
+
+test('a rejected submission retains safe provider diagnostics across a task engine restart',async t=>{
+ const f=await fixture(t,{executeCandidate:async()=>{throw Object.assign(error('API_ERROR'),{providerCode:'FixtureCloneRejected',operation:'/api/v1/order/instance/clone/payg',httpStatus:200,retryable:false});}}),task=await start(f.engine);
+ await f.clock.advance();const expected={code:'API_ERROR',stage:'execute',providerCode:'FixtureCloneRejected',operation:'/api/v1/order/instance/clone/payg',httpStatus:200,retryable:false};
+ assert.equal(f.engine.info(task.id).state,'failed');assert.deepEqual(f.engine.info(task.id).errorDetail,expected);
+ const stored=await readFile(join(f.state,'resource-tasks.json'),'utf8');assert.ok(!stored.includes('do-not-persist'));await f.engine.close();
+ const recovered=new loaded.ResourceTasks({state:f.state,prepareCandidate:async()=>null,executeCandidate:async()=>{throw new Error('must not resume');}});await recovered.init();
+ try{assert.deepEqual(recovered.info(task.id).errorDetail,expected);assert.equal(recovered.active,false);}finally{await recovered.close();}
+});
+
+test('candidate failures identify the query stage and clear stale diagnostics after a successful acquisition',async t=>{
+ let reads=0;const f=await fixture(t,{prepareCandidate:async()=>{if(++reads===2)throw Object.assign(error('API_ERROR'),{providerCode:'HTTP503',operation:'/api/v1/order/price/preview',httpStatus:503,retryable:true});return {quote:{totalHourly:2}};}}),task=await start(f.engine);
+ await f.clock.advance();assert.equal(f.engine.info(task.id).state,'waiting');assert.equal(f.engine.info(task.id).errorDetail.stage,'candidate');assert.equal(f.engine.info(task.id).errorDetail.httpStatus,503);
+ await f.clock.advance(10000);assert.equal(f.engine.info(task.id).state,'submitted');assert.equal(Object.hasOwn(f.engine.info(task.id),'errorDetail'),false);
+});
+
+test('task diagnostics discard arbitrary provider text, URL queries and credential fields',async t=>{
+ const f=await fixture(t,{executeCandidate:async()=>{throw Object.assign(error('API_ERROR'),{providerCode:'token=private-diagnostic-secret',operation:'/api/v1/instance?token=private-diagnostic-secret',httpStatus:'private-diagnostic-secret',password:'private-diagnostic-secret'});}}),task=await start(f.engine);
+ await f.clock.advance();assert.deepEqual(f.engine.info(task.id).errorDetail,{code:'API_ERROR',stage:'execute'});
+ assert.ok(!(await readFile(join(f.state,'resource-tasks.json'),'utf8')).includes('private-diagnostic-secret'));
 });
 
 test('invalid images and disk configuration stop polling and require a new policy',async t=>{

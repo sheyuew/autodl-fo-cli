@@ -106,7 +106,7 @@ export class InstanceManager{
   if(plan.expiresAt<=Date.now())throw fail('PLAN_EXPIRED','确认在复查期间已过期，请重新预览');
   if(typeof beforeSubmit==='function')beforeSubmit();
   try{await this.#api.request({path:spec.path.startsWith('/')?spec.path:'/api/v1/instance/'+spec.path,method:spec.method||'POST'},plan.body);}
-  catch(error){if(['NETWORK','SCHEMA_CHANGED'].includes(error.code)||error.retryable&&error.code==='API_ERROR')throw fail('ACTION_UNCERTAIN','请求结果未知，请先刷新实例或镜像状态，避免重复提交');throw error;}
+  catch(error){if(['NETWORK','SCHEMA_CHANGED'].includes(error.code)||error.retryable&&error.code==='API_ERROR')throw Object.assign(fail('ACTION_UNCERTAIN','请求结果未知，请先刷新实例或镜像状态，避免重复提交'),pick(error,['providerCode','operation','httpStatus']),{retryable:false});throw error;}
   return {accepted:true,action:plan.action,instanceUuid:plan.instanceUuid};
  }
 }

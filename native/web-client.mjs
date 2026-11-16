@@ -33,32 +33,38 @@ export class WebClient{
     return this.#request(endpoints[operation],body);
   }
   async #request(endpoint,body){
-    if(this.#expired)throw failure('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');
+    let response;
+    const reject=(code,message,details={})=>failure(code,message,{operation:endpoint.path,...(response?{httpStatus:response.status}:{}),...details});
+    if(this.#expired)throw reject('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');
     const path=this.identity.subaccount?endpoint.path.replace('/api/v1/','/api/v1/sub_user/'):endpoint.path;
     const url=new URL(this.#baseUrl+path);for(const key of endpoint.query||[])if(body?.[key]!=null)url.searchParams.set(key,String(body[key]));
-    let response;const signal=AbortSignal.timeout(this.#timeoutMs);
+    const signal=AbortSignal.timeout(this.#timeoutMs);
     try{response=await fetch(url,{method:endpoint.method,redirect:'error',headers:{Authorization:this.#session.token,AppVersion:this.#session.appVersion||'0.0.0','Content-Type':'application/json',Accept:'application/json','User-Agent':'autodl-http-cli'},...(endpoint.method!=='GET'?{body:JSON.stringify(body||{})}:{}),signal});}
-    catch{throw failure('NETWORK','AutoDL 请求失败或超时',{retryable:true});}
+    catch{throw reject('NETWORK','AutoDL 请求失败或超时',{retryable:true});}
     if(!response.ok){
       try{await response.body?.cancel();}catch{}
-      if(response.status===401){this.#expired=true;throw failure('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');}
-      if(response.status===403)throw failure('PERMISSION_DENIED','该子账号没有此接口的权限');
+      if(response.status===401){this.#expired=true;throw reject('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');}
+      if(response.status===403)throw reject('PERMISSION_DENIED','该子账号没有此接口的权限');
       if(response.status===429){
         const raw=response.headers.get('Retry-After'),seconds=raw==null?NaN:Number(raw);
-        throw failure('RATE_LIMITED','AutoDL 暂时限制了请求频率，请稍后重试',{retryable:true,...(Number.isFinite(seconds)&&seconds>=0?{retryAfterSeconds:seconds}:{})});
+        throw reject('RATE_LIMITED','AutoDL 暂时限制了请求频率，请稍后重试',{retryable:true,...(Number.isFinite(seconds)&&seconds>=0?{retryAfterSeconds:seconds}:{})});
       }
-      throw failure('API_ERROR','AutoDL 读取服务暂时不可用',{providerCode:`HTTP${response.status}`,retryable:response.status===408||response.status>=500});
+      throw reject('API_ERROR','AutoDL 服务暂时不可用',{providerCode:`HTTP${response.status}`,retryable:response.status===408||response.status>=500});
     }
     let envelope;
     try{envelope=await response.json();}catch(error){
-      if(signal.aborted||error?.name==='AbortError'||error instanceof TypeError)throw failure('NETWORK','AutoDL 响应中断或超时',{retryable:true});
-      throw failure('SCHEMA_CHANGED','AutoDL 响应不是 JSON');
+      if(signal.aborted||error?.name==='AbortError'||error instanceof TypeError)throw reject('NETWORK','AutoDL 响应中断或超时',{retryable:true});
+      throw reject('SCHEMA_CHANGED','AutoDL 响应不是 JSON');
     }
-    if(!envelope||typeof envelope!=='object'||Array.isArray(envelope)||typeof envelope.code!=='string')throw failure('SCHEMA_CHANGED','AutoDL 响应结构发生变化');
+    if(!envelope||typeof envelope!=='object'||Array.isArray(envelope)||typeof envelope.code!=='string')throw reject('SCHEMA_CHANGED','AutoDL 响应结构发生变化');
     if(['AuthorizeFailed','Unauthorized','TokenExpired','TokenInvalid'].includes(envelope.code)){
-      this.#expired=true;throw failure('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录');
+      this.#expired=true;throw reject('LOGIN_REQUIRED','AutoDL 登录已过期，请重新登录',{providerCode:envelope.code});
     }
-    if(envelope.code!=='Success')throw failure('API_ERROR',`AutoDL 拒绝了请求（${envelope.code.slice(0,80)}）`,{providerCode:envelope.code.slice(0,80)});
+    if(envelope.code!=='Success'){
+      const providerCode=/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(envelope.code)?envelope.code:'UnrecognizedCode';
+      if(providerCode==='MachineGpuNumUpdateFailed')throw reject('NO_STOCK','该主机空闲 GPU 数量不足，请等待其他库存',{providerCode});
+      throw reject('API_ERROR',`AutoDL 拒绝了请求（${providerCode}）`,{providerCode});
+    }
     return envelope.data;
   }
   async #pages(operation,body){

@@ -26,3 +26,34 @@ test('a login response naming another account is rejected before passport exchan
   let calls=0;const baseUrl=await server(t,(_q,r)=>{calls++;send(r,{ticket:'t',user:{id:1,sub_name:'bob@team'}});});
   await assert.rejects(login({username:'alice@team',password:'password'},{baseUrl}),{code:'ACCOUNT_MISMATCH'});assert.equal(calls,1);
 });
+
+test('credential and ticket failures identify their stage and safe business code without returning provider details',async t=>{
+ for(const stage of ['credentials','passport']){
+  const baseUrl=await server(t,(q,r)=>{
+   if(stage==='passport'&&q.url.endsWith('/login'))send(r,{ticket:'fixture-private-ticket',user:{id:1,sub_name:'alice@team'}});
+   else r.end(JSON.stringify({code:stage==='credentials'?'PasswordWrong':'TicketExpired',msg:'password fixture-private-ticket fixture-secret-token',data:{token:'fixture-secret-token'}}));
+  });
+  await assert.rejects(login({username:'alice@team',password:'fixture-password'},{baseUrl}),e=>{
+   assert.equal(e.code,'LOGIN_REJECTED');assert.match(e.message,stage==='credentials'?/账号验证.*PasswordWrong/:/会话换取.*TicketExpired/);
+   for(const secret of ['fixture-password','fixture-private-ticket','fixture-secret-token'])assert.ok(!e.message.includes(secret));return true;
+  });
+ }
+});
+
+test('login rate limiting and server outages are distinct from rejected credentials even with HTML responses',async t=>{
+ for(const status of [429,503]){
+  const baseUrl=await server(t,(_q,r)=>{r.statusCode=status;if(status===429)r.setHeader('Retry-After','30');r.end('<html>unavailable</html>');});
+  await assert.rejects(login({username:'alice@team',password:'password'},{baseUrl}),e=>{
+   assert.equal(e.code,status===429?'RATE_LIMITED':'API_ERROR');assert.match(e.message,new RegExp(String(status)));if(status===429)assert.equal(e.retryAfterSeconds,30);return true;
+  });
+ }
+});
+
+test('malformed login replies have a schema error and arbitrary provider text is not printed',async t=>{
+ for(const payload of [null,{code:'ticket=fixture-secret-token',msg:'private response'}]){
+  const baseUrl=await server(t,(_q,r)=>r.end(JSON.stringify(payload)));
+  await assert.rejects(login({username:'alice@team',password:'password'},{baseUrl}),e=>{
+   assert.equal(e.code,payload===null?'SCHEMA_CHANGED':'LOGIN_REJECTED');assert.ok(!e.message.includes('fixture-secret-token'));assert.ok(!e.message.includes('private response'));return true;
+  });
+ }
+});

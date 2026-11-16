@@ -9,7 +9,7 @@ export const GB=1024**3;
 export async function provisionFixture(t){
  const directory=await mkdtemp(join(tmpdir(),'fo-provision-rpc-')),seen=[],events=[];
  const state={idle:2,price:2200,created:false,sourceStatus:'shutdown'};
- const machine={machine_id:123,region_sign:'west-A',region_name:'West',gpu_name:'RTX 4090',gpu_number:8,on_line:2,max_instance_num:20,binding_instance_num:3,max_instance_disk_size:50*GB,max_data_disk_expand_size:500*GB,chip_corp:'nvidia',cpu_arch:'amd64',driver_version:'550.1',highest_cuda_version:'12.4',rent_mode:''};
+ const machine={machine_id:123,region_sign:'west-A',region_name:'West',gpu_name:'RTX 4090',gpu_memory:24*GB,gpu_number:8,on_line:2,max_instance_num:20,binding_instance_num:3,max_instance_disk_size:50*GB,max_data_disk_expand_size:500*GB,chip_corp:'nvidia',cpu_arch:'amd64',driver_version:'550.1',highest_cuda_version:'12.4',rent_mode:''};
  state.machines=[machine];
  const source={uuid:'source',machine_id:123,name:'source',status:'shutdown',charge_type:'payg',private_image_uuid:'private-1',expand_data_disk_size:10*GB,region_sign:'west-A',req_gpu_amount:1};
  const server=createServer(async(q,r)=>{
@@ -27,7 +27,11 @@ export async function provisionFixture(t){
   else if(path==='/api/v1/sub_user/order/price/preview')data={payg_price:state.price,data_disk_info:{data_disk_deal_daily_price:body.expand_data_disk/GB*48},prepay_expand_data_disk:false};
   else if(path==='/api/v1/sub_user/order/data_disk/change/preview')data={max_expand_size:500*GB,data_disk_deal_daily_price:960};
   else if(path==='/api/v1/sub_user/order/data_disk/change')data=null;
-  else if(['/api/v1/sub_user/order/instance/create/payg','/api/v1/sub_user/order/instance/clone/payg'].includes(path)){state.created=true;data='created';}
+  else if(['/api/v1/sub_user/order/instance/create/payg','/api/v1/sub_user/order/instance/clone/payg'].includes(path)){
+   if(state.provisionStatus){r.statusCode=state.provisionStatus;r.end('service unavailable');return;}
+   if(state.provisionError){r.end(JSON.stringify({code:state.provisionError,msg:'private-provider-detail token=must-not-save'}));return;}
+   state.created=true;data='created';
+  }
   else if(path==='/api/v1/sub_user/instance/power_on'){state.sourceStatus='running';data=null;}
   else {r.statusCode=404;r.end(JSON.stringify({code:'FixtureUnexpectedEndpoint'}));return;}
   r.end(JSON.stringify({code:'Success',data}));

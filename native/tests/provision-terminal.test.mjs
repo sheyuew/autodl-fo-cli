@@ -21,6 +21,7 @@ test('creation menu shows full configuration and live costs, no cancels and yes 
  assert.equal(typeof menus?.provisionMenu,'function','provisioning menu is not implemented');
  const f=await setup(t),no=ui(t,[...createInputs],false);await menus.provisionMenu(f.client,no.io);
  assert.equal(no.confirmations,1);assert.equal(no.errors.length,0);assert.equal(f.seen.filter(x=>x.path.endsWith('/create/payg')).length,0);
+ assert.ok(!no.prompts.some(prompt=>prompt.includes('最低显存')));
  assert.match(no.output.join('\n'),/50/);assert.match(no.output.join('\n'),/2\.220/);assert.match(no.output.join('\n'),/0\.480/);
  const yes=ui(t,[...createInputs],true);await menus.provisionMenu(f.client,yes.io);assert.equal(yes.errors.length,0);
  const writes=f.seen.filter(x=>x.path.endsWith('/create/payg'));assert.equal(writes.length,1);assert.equal(writes[0].body.instance_info.base_image_uuid,'base-1');assert.equal(writes[0].body.instance_info.expand_data_disk,10*1024**3);assert.equal(writes[0].body.instance_info.instance_name,'new run');
@@ -44,21 +45,24 @@ test('automatic power-on needs an hourly budget, time and interval before yes st
  assert.equal(typeof menus?.resourceMenu,'function');const f=await setup(t),u=ui(t,['1','1','1','0','3','1','10','q']);
  await menus.resourceMenu(f.client,u.io);assert.equal(u.errors.length,0);assert.equal(u.confirmations,1);const tasks=await f.client.tasks();assert.equal(tasks.length,1);
  assert.equal(tasks[0].policy.mode,'powerOn');assert.equal(tasks[0].policy.maxHourly,3);assert.equal(tasks[0].policy.maxMinutes,1);assert.equal(tasks[0].policy.intervalSeconds,10);
+ assert.ok(!u.prompts.some(prompt=>prompt.includes('最低显存')));
  assert.match(u.output.join('\n'),/不.*自动关机|不会.*关机/);await until(()=>f.state.sourceStatus==='running');
 });
 test('automatic create and clone policies preserve selected conditions and no starts no task',async t=>{
  assert.equal(typeof menus?.resourceMenu,'function');const f=await setup(t);
- for(const [mode,inputs] of [['create',['2','1','1','1','1','1','1','10','new run']],['clone',['3','1','1','1','1','no','1','10','clone run']]]){
+ for(const [mode,inputs] of [['create',['2','1','1','1','0','1','1','1','10','new run']],['clone',['3','1','1','1','0','1','no','1','10','clone run']]]){
   const u=ui(t,['1',...inputs,'3','1','10','q'],false);await menus.resourceMenu(f.client,u.io);assert.equal(u.errors.length,0);assert.equal(u.confirmations,1);
   assert.match(u.output.join('\n'),new RegExp(mode));assert.equal((await f.client.tasks()).length,0);
+  const policy=u.output.map(line=>{try{return JSON.parse(line);}catch{return null;}}).find(value=>value?.mode===mode&&value.regionSigns);
+  assert.ok(!Object.hasOwn(policy,'minGpuMemoryGB'));
  }
 });
 test('automatic creation allows the platform default name without persisting an invalid empty policy name',async t=>{
- assert.equal(typeof menus?.resourceMenu,'function');const f=await setup(t),u=ui(t,['1','2','1','1','1','1','1','1','10','','3','1','10','q'],false);
+ assert.equal(typeof menus?.resourceMenu,'function');const f=await setup(t),u=ui(t,['1','2','1','1','1','0','1','1','1','10','','3','1','10','q'],false);
  await menus.resourceMenu(f.client,u.io);assert.equal(u.errors.length,0,u.errors.map(e=>e.code+':'+e.message).join(' '));assert.equal(u.confirmations,1);assert.equal((await f.client.tasks()).length,0);
 });
 test('automatic minimum-total disk selection reaches HTTP preview with only the required paid capacity',async t=>{
- const f=await setup(t),u=ui(t,['1','2','1','1','1','1','1','2','70','Minimum disk','3','1','10','q'],false);
+ const f=await setup(t),u=ui(t,['1','2','1','1','1','0','1','1','2','70','Minimum disk','3','1','10','q'],false);
  await menus.resourceMenu(f.client,u.io);
  assert.equal(u.errors.length,0,u.errors.map(e=>e.code+':'+e.message).join(' '));assert.equal(u.confirmations,1);
  const policy=u.output.map(line=>{try{return JSON.parse(line);}catch{return null;}}).find(value=>value?.mode==='create'&&value.regionSigns);

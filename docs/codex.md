@@ -140,10 +140,12 @@ bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A"],"gpuN
 
 `regionSigns` 和 `gpuNames` 可分别填多个真实目录值，分别表示任意地区、任意型号，组合匹配；卡数仍是同一主机上的数量，任务最多获取一个实例。新建/克隆在整个所选范围内寻找，不绑定镜像目录使用的参考主机。主菜单 8 同样支持多选，可输入 `1,3` 或 `all`。
 
+新建/克隆可选 `minGpuMemoryGB` 指定每张 GPU 最低显存，整数 1 至 10000；省略为不限制。菜单 `0` 会省略该字段。型号、单卡显存、卡数需同时满足，不能以多卡显存之和替代单卡要求。按实际主机详情中的显存字节数核实，无法验证则跳过。原实例开机使用固定 GPU，不接受此跨主机筛选条件。预览同时展示 `minGpuMemoryGB` 和候选实际 `gpuMemoryGB`。
+
 数据盘条件必须二选一：`dataDiskGB` 固定额外付费容量，或 `minDataDiskGB` 最低总容量。最低总容量按各主机免费容量计算最少额外付费 GB，仍受 `maxHourly` 完整费用上限约束；例如免费 100 GB、最低总量 900 GB 时实际付费扩容 800 GB。采用最低总量时省略 `dataDiskGB`：
 
 ```bash
-bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A","REGION_B"],"gpuNames":["GPU_A","GPU_B"],"gpuCount":1,"imageUuid":"IMAGE_UUID","imageType":"base","minDataDiskGB":900,"maxHourly":5,"maxMinutes":60,"maxAttempts":120,"intervalSeconds":30}' --json
+bash ./fo task prepare --data '{"mode":"create","regionSigns":["REGION_A","REGION_B"],"gpuNames":["GPU_A","GPU_B"],"gpuCount":1,"minGpuMemoryGB":32,"imageUuid":"IMAGE_UUID","imageType":"base","minDataDiskGB":900,"maxHourly":5,"maxMinutes":60,"maxAttempts":120,"intervalSeconds":30}' --json
 ```
 
 展示策略中的磁盘含义，以及当前候选的免费、额外付费、总容量。最低总量模式下，若克隆且复制数据盘，实际容量取用户最低值与完整源盘容量中的较大者，再计算最少付费扩容；固定额外容量模式保持用户指定值。磁盘扩容上限或主机起租卡数不满足时跳过主机；当前全部不满足时保持等待。提交前配置或报价变动时，任务在已确认策略范围内重新匹配和核价。目录查询没有预留库存，不能保证平台最终成功分配。
@@ -164,6 +166,8 @@ bash ./fo notifications --after CURSOR --json
 `task watch` 是终端前台跟踪，不加 `--json`；机器查询用 `task info`。后台任务可在关闭登录终端、菜单或 watch 后继续，电脑必须保持开机、唤醒和联网。任务结束会尝试本地桌面提醒，通知记录可用 `notifications` 查询，按 `cursor` 增量读取。
 
 状态判断：`waiting/quoting` 是等待与报价，`submitting` 是提交，`verifying` 是核查已接受的请求，**只有 `completed` 且目标实际 running 才报告抢卡成功**。`submitted` 不是运行成功；`uncertain` 时先查返回的实例 UUID 和实例列表，停止自动提交。时限限制监控，不会关闭已租到的实例；任务成功后实例持续计费，用户使用完再按流程关机。
+
+失败时读取 `errorDetail` 的 `providerCode`、`httpStatus`、`operation` 与 `stage`，这些字段会脱敏保存。`candidate` 是候选筛选/报价，`execute` 包含提交前复查及实际提交，`observe` 是实例状态确认；`execute` 不能单独证明已调用付费接口，结合 `operation` 区分。平台明确返回 `MachineGpuNumUpdateFailed` 时按库存不足继续等待；未知业务码仍停止处理，不能推定为缺卡或自动重发。旧任务未保存的业务码无法安全恢复，先查看实际实例，不能为了诊断重发付费请求。
 
 取消先展示目标，再让用户确认：
 

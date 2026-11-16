@@ -64,7 +64,7 @@ test('rename, timer cancellation, image save, stop and restart use the webpage m
 });
 test('a lost mutation acknowledgement is uncertain and its plan cannot be retried',async t=>{
  const {client,seen,state}=await fixture(t);assert.equal(typeof client.prepareInstance,'function');const p=await client.prepareInstance('rename','one',{name:'new'});state.disconnect=true;
- await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'ACTION_UNCERTAIN'});await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_EXPIRED'});assert.equal(writes(seen).length,1);
+ await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'ACTION_UNCERTAIN',operation:'/api/v1/instance/name',retryable:false});await assert.rejects(client.executeInstance(p.id,{confirmed:true}),{code:'PLAN_EXPIRED'});assert.equal(writes(seen).length,1);
 });
 test('details, monitoring and image lists are usable without exposing unrelated provider credentials',async t=>{
  const {client}=await fixture(t);assert.equal(typeof client.instanceInfo,'function');const d=await client.instanceInfo('one');assert.equal(d.uuid,'one');assert.ok(!JSON.stringify(d).includes('secret'));assert.ok(!JSON.stringify(d).includes('jupyter_token'));

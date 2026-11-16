@@ -45,11 +45,11 @@ class HttpRuntime{
     for(const m of machines){
       if(!policy.regionSigns.includes(m.region_sign)||!policy.gpuNames.includes(m.gpu_name)||m.gpu_idle_num<policy.gpuCount||[3,4,5,6].includes(m.on_line)||Number.isFinite(m.max_instance_num)&&Number.isFinite(m.binding_instance_num)&&m.max_instance_num<=m.binding_instance_num)continue;
       if(policy.driverVersion!==undefined&&policy.driverVersion!==m.driver_version)continue;
-      let plan;try{plan=await client.prepareProvision(policy.mode,{machineId:m.machine_id,gpuCount:policy.gpuCount,name:policy.name,...(policy.minDataDiskGB===undefined?{dataDiskGB:policy.dataDiskGB}:{minDataDiskGB:policy.minDataDiskGB}),imageUuid:policy.imageUuid,imageType:policy.imageType,sourceInstanceUuid:policy.sourceInstanceUuid,copyDataDisk:policy.copyDataDisk,driverVersion:policy.driverVersion});}
+      let plan;try{plan=await client.prepareProvision(policy.mode,{machineId:m.machine_id,gpuCount:policy.gpuCount,minGpuMemoryGB:policy.minGpuMemoryGB,name:policy.name,...(policy.minDataDiskGB===undefined?{dataDiskGB:policy.dataDiskGB}:{minDataDiskGB:policy.minDataDiskGB}),imageUuid:policy.imageUuid,imageType:policy.imageType,sourceInstanceUuid:policy.sourceInstanceUuid,copyDataDisk:policy.copyDataDisk,driverVersion:policy.driverVersion});}
       catch(error){if(['NO_STOCK','DATA_DISK_UNAVAILABLE','HOST_CONFIG_MISMATCH'].includes(error.code)){hostUnavailable=true;continue;}if(['IMAGE_INCOMPATIBLE','IMAGE_REQUIRED'].includes(error.code)){configurationError??=error;continue;}throw error;}
       const c=plan.configuration;
-      if(!policy.regionSigns.includes(c.regionSign)||!policy.gpuNames.includes(c.gpuName)||c.gpuCount!==policy.gpuCount||policy.driverVersion!==undefined&&c.driverVersion!==policy.driverVersion||policy.minDataDiskGB!==undefined&&c.totalDataDiskGB<policy.minDataDiskGB||policy.minDataDiskGB===undefined&&c.dataDiskGB!==policy.dataDiskGB){hostUnavailable=true;continue;}
-      plan={...plan,...pick(plan.configuration,['machineId','regionSign','gpuName','gpuCount','dataDiskGB','freeDataDiskGB','totalDataDiskGB','driverVersion']),imageUuid:plan.configuration.image?.imageUuid};
+      if(!policy.regionSigns.includes(c.regionSign)||!policy.gpuNames.includes(c.gpuName)||c.gpuCount!==policy.gpuCount||policy.minGpuMemoryGB!==undefined&&(!Number.isFinite(c.gpuMemoryGB)||c.gpuMemoryGB<policy.minGpuMemoryGB)||policy.driverVersion!==undefined&&c.driverVersion!==policy.driverVersion||policy.minDataDiskGB!==undefined&&c.totalDataDiskGB<policy.minDataDiskGB||policy.minDataDiskGB===undefined&&c.dataDiskGB!==policy.dataDiskGB){hostUnavailable=true;continue;}
+      plan={...plan,...pick(plan.configuration,['machineId','regionSign','gpuName','gpuCount','gpuMemoryGB','dataDiskGB','freeDataDiskGB','totalDataDiskGB','driverVersion']),imageUuid:plan.configuration.image?.imageUuid};
       if(plan.quote.totalHourly<=policy.maxHourly)return plan;
       if(!overBudget||plan.quote.totalHourly<overBudget.quote.totalHourly)overBudget=plan;
     }
@@ -99,7 +99,7 @@ class HttpRuntime{
     if(q.op==='instances'||q.op==='catalog'&&q.query==='instances')return (await client.instances()).map(r=>pick(r,['uuid','name','status','charge_type','has_auto_panel','snapshot_gpu_alias_name','gpu_name','req_gpu_amount','region_sign','start_mode']));
     if(q.op==='regions')return client.regions();
     if(q.op==='gpu-types')return (await client.gpuTypes()).map(r=>pick(r,['gpu_name','chip_corp','cpu_arch']));
-    if(q.op==='machines')return (await client.machines(q.args||{})).map(r=>pick(r,['machine_id','gpu_name','region_sign','region_name','gpu_idle_num','gpu_num','gpu_number','driver_version','highest_cuda_version','max_instance_disk_size','max_data_disk_expand_size']));
+    if(q.op==='machines')return (await client.machines(q.args||{})).map(r=>pick(r,['machine_id','gpu_name','gpu_memory','region_sign','region_name','gpu_idle_num','gpu_num','gpu_number','driver_version','highest_cuda_version','max_instance_disk_size','max_data_disk_expand_size']));
     if(q.op==='instance-info')return client.instanceInfo(q.instanceUuid);
     if(q.op==='instance-connection')return client.connection(q.instanceUuid,{includeSecrets:q.includeSecrets===true,confirmed:q.confirmed===true});
     if(q.op==='instance-monitor')return client.monitor(q.instanceUuid);

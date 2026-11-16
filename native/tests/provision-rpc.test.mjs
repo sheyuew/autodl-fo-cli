@@ -32,6 +32,28 @@ test('background acquisition only completes after the provider reports running a
  const stored=await readFile(join(a.profile,'resource-tasks.json'),'utf8');assert.doesNotMatch(stored,/fixture-password|fixture-private-token|must-not-leak/);
  const notifications=await a.request({op:'notifications'});assert.ok(notifications.events.some(e=>e.kind==='success'&&e.instanceUuid==='created'));
 });
+test('clone task rejection records the actual provider code and operation without private response text',async t=>{
+ const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);f.state.provisionError='FixtureCloneRejected';
+ const p=await a.request({op:'task-prepare',policy:{...policy,mode:'clone',sourceInstanceUuid:'source',copyDataDisk:true}});
+ const task=await a.request({op:'task-start',planId:p.planId,confirmed:true});
+ const result=await until(async()=>{const r=await a.request({op:'task-info',taskId:task.id});return r.state==='failed'&&r;});
+ assert.equal(result.submitted,false);assert.equal(result.errorDetail.providerCode,'FixtureCloneRejected');assert.equal(result.errorDetail.operation,'/api/v1/order/instance/clone/payg');assert.equal(result.errorDetail.httpStatus,200);assert.equal(result.errorDetail.stage,'execute');
+ const stored=await readFile(join(a.profile,'resource-tasks.json'),'utf8');assert.doesNotMatch(stored,/private-provider-detail|must-not-save/);assert.equal(f.seen.filter(q=>q.path.endsWith('/clone/payg')).length,1);
+});
+test('an explicit GPU-stock rejection waits rather than permanently failing the clone task',async t=>{
+ const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);f.state.provisionError='MachineGpuNumUpdateFailed';
+ const p=await a.request({op:'task-prepare',policy:{...policy,mode:'clone',sourceInstanceUuid:'source',copyDataDisk:true}});
+ const task=await a.request({op:'task-start',planId:p.planId,confirmed:true});
+ const result=await until(async()=>{const r=await a.request({op:'task-info',taskId:task.id});return ['waiting','failed'].includes(r.state)&&r.errorCode&&r;});
+ assert.equal(result.state,'waiting');assert.equal(result.errorCode,'NO_STOCK');assert.equal(result.errorDetail.providerCode,'MachineGpuNumUpdateFailed');assert.equal(result.submitted,false);assert.equal(f.seen.filter(q=>q.path.endsWith('/clone/payg')).length,1);
+});
+test('a clone server failure retains its HTTP diagnostics while stopping uncertain submissions',async t=>{
+ const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);f.state.provisionStatus=503;
+ const p=await a.request({op:'task-prepare',policy:{...policy,mode:'clone',sourceInstanceUuid:'source',copyDataDisk:true}});
+ const task=await a.request({op:'task-start',planId:p.planId,confirmed:true});
+ const result=await until(async()=>{const r=await a.request({op:'task-info',taskId:task.id});return r.state==='uncertain'&&r;});
+ assert.equal(result.errorCode,'ACTION_UNCERTAIN');assert.equal(result.errorDetail.providerCode,'HTTP503');assert.equal(result.errorDetail.operation,'/api/v1/order/instance/clone/payg');assert.equal(result.errorDetail.httpStatus,503);assert.equal(result.errorDetail.retryable,false);assert.equal((await a.request({op:'doctor'})).activeTasks,false);assert.equal(f.seen.filter(q=>q.path.endsWith('/clone/payg')).length,1);
+});
 test('a misconfigured acquisition image fails during preview instead of being hidden as empty stock',async t=>{
  const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);
  await assert.rejects(a.request({op:'task-prepare',policy:{...policy,imageUuid:'not-an-image'}}),{code:'IMAGE_REQUIRED'});
@@ -42,6 +64,19 @@ test('acquisition waits when every host lacks disk expansion and matches a later
  const waiting=await a.request({op:'task-prepare',policy});assert.equal(waiting.candidate,null);
  f.state.machines[0].max_data_disk_expand_size=20*GB;
  const ready=await a.request({op:'task-prepare',policy});assert.equal(ready.candidate.machineId,123);assert.equal(ready.candidate.totalDataDiskGB,60);
+ assert.equal(f.seen.filter(q=>q.path.endsWith('/create/payg')).length,0);
+});
+test('acquisition skips unverified or insufficient per-card GPU memory and selects another host',async t=>{
+ const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);const base=f.state.machines[0];
+ f.state.machines=[{...base,gpu_memory:null},{...base,machine_id:124,gpu_memory:16*GB},{...base,machine_id:125,gpu_memory:32*GB}];
+ const plan=await a.request({op:'task-prepare',policy:{...policy,gpuCount:2,minGpuMemoryGB:24}});
+ assert.equal(plan.candidate.machineId,125);assert.equal(plan.candidate.gpuMemoryGB,32);assert.equal(plan.policy.minGpuMemoryGB,24);assert.equal(f.seen.filter(q=>q.path.endsWith('/create/payg')).length,0);
+});
+test('acquisition checks current GPU memory rather than accepting or excluding a stale inventory value',async t=>{
+ const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);f.state.machines[0].gpu_memory=16*GB;f.state.machineDetails={'123':{gpu_memory:32*GB}};
+ const plan=await a.request({op:'task-prepare',policy:{...policy,minGpuMemoryGB:24}});assert.ok(plan.candidate);assert.equal(plan.candidate.machineId,123);assert.equal(plan.candidate.gpuMemoryGB,32);
+ f.state.machines[0].gpu_memory=32*GB;
+ for(const memory of [16*GB,null,'34359738368']){f.state.machineDetails={'123':{gpu_memory:memory}};const waiting=await a.request({op:'task-prepare',policy:{...policy,minGpuMemoryGB:24}});assert.equal(waiting.candidate,null);}
  assert.equal(f.seen.filter(q=>q.path.endsWith('/create/payg')).length,0);
 });
 test('acquisition checks later regions and hosts after disk, rental-count and image mismatches',async t=>{
@@ -102,7 +137,7 @@ test('malformed host disk metadata stops acquisition instead of silently selecti
 });
 test('machine listings expose expansion capacity so clients can show achievable total disk',async t=>{
  const f=await provisionFixture(t),a=await f.start('alice');await f.login(a.request);const machines=await a.request({op:'machines',args:{regionSigns:['west-A']}});
- assert.equal(machines[0].max_data_disk_expand_size,500*GB);assert.doesNotMatch(JSON.stringify(machines),/must-not-leak/);
+ assert.equal(machines[0].max_data_disk_expand_size,500*GB);assert.equal(machines[0].gpu_memory,24*GB);assert.doesNotMatch(JSON.stringify(machines),/must-not-leak/);
 });
 test('automatic tasks remain visible after restart and never silently resume paid authorization',async t=>{
  const f=await provisionFixture(t);f.state.idle=0;const a=await f.start('alice');await f.login(a.request);

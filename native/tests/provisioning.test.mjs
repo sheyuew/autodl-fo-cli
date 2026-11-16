@@ -29,6 +29,27 @@ test('create previews full hourly quote then submits only the confirmed exact na
  const result=await manager.execute(plan.id,{confirmed:true});assert.equal(result.accepted,true);assert.equal(result.instanceUuid,'new-instance-1');assert.equal(result.state,'submitted');
  assert.equal(state.writes.length,1);assert.equal(state.writes[0].path,'/api/v1/order/instance/create/payg');assert.equal(state.writes[0].body.instance_info.req_gpu_amount,2);assert.equal(state.writes[0].body.instance_info.instance_name,'new run');assert.equal(state.writes[0].body.price_info.expand_data_disk,10*GB);await assert.rejects(manager.execute(plan.id,{confirmed:true}),{code:'PLAN_EXPIRED'});
 });
+test('GPU memory minimum is per card rather than aggregate memory across multiple GPUs',async()=>{
+ const {manager,state}=fixture();state.machine.gpu_memory=24*GB;
+ const plan=await manager.prepare('create',{...creation,minGpuMemoryGB:24});assert.equal(plan.configuration.gpuMemoryGB,24);assert.equal(plan.configuration.gpuCount,2);
+ await assert.rejects(manager.prepare('create',{...creation,minGpuMemoryGB:25}),{code:'HOST_CONFIG_MISMATCH'});assert.equal(state.writes.length,0);
+});
+test('unknown or malformed host GPU memory cannot satisfy a requested minimum',async()=>{
+ const {manager,state}=fixture();
+ for(const memory of [undefined,null,'25769803776',0,-1,NaN,Infinity]){state.machine.gpu_memory=memory;await assert.rejects(manager.prepare('create',{...creation,minGpuMemoryGB:1}),{code:'HOST_CONFIG_MISMATCH'});}
+ delete state.machine.gpu_memory;const unconstrained=await manager.prepare('create',creation);assert.equal(Object.hasOwn(unconstrained.configuration,'gpuMemoryGB'),false);assert.equal(state.writes.length,0);
+});
+test('GPU memory constraints are validated before querying or renting a host',async()=>{
+ const {manager,state}=fixture();state.machine.gpu_memory=24*GB;
+ for(const memory of [0,-1,1.5,10001,'24',null])await assert.rejects(manager.prepare('create',{...creation,minGpuMemoryGB:memory}),{code:'INVALID_REQUEST'});
+ assert.equal(state.writes.length,0);
+});
+test('clone GPU memory is revalidated from current host details immediately before payment',async()=>{
+ const {manager,state}=fixture(),args={machineId:123,gpuCount:2,sourceInstanceUuid:'source-1',dataDiskGB:10,minGpuMemoryGB:24};state.machine.gpu_memory=24*GB;
+ const plan=await manager.prepare('clone',args);assert.equal(plan.configuration.gpuMemoryGB,24);state.machine.gpu_memory=16*GB;
+ await assert.rejects(manager.execute(plan.id,{confirmed:true}),{code:'HOST_CONFIG_MISMATCH'});assert.equal(state.writes.length,0);
+ await assert.rejects(manager.prepare('clone',args),{code:'HOST_CONFIG_MISMATCH'});
+});
 test('minimum-total plans derive paid capacity from verified host details and recheck the minimum before payment',async()=>{
  const {manager,state}=fixture(),{dataDiskGB,...args}=creation;
  let plan=await manager.prepare('create',{...args,minDataDiskGB:70});assert.equal(plan.configuration.dataDiskGB,20);assert.equal(plan.configuration.totalDataDiskGB,70);assert.equal(plan.body.instance_info.expand_data_disk,20*GB);

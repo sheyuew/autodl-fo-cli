@@ -44,7 +44,9 @@ export class ProvisioningManager{
   if(args.chargeType!==undefined&&args.chargeType!=='payg')throw fail('UNSUPPORTED_OPERATION','当前新建和克隆只支持按量计费');
   if(args.systemDiskGB!==undefined&&args.systemDiskGB!==0)throw fail('UNSUPPORTED_OPERATION','普通容器不支持系统盘扩容；Pro 使用独立接口，当前不混用');
   if(args.dataDiskGB!==undefined&&args.minDataDiskGB!==undefined)throw fail('INVALID_REQUEST','固定额外付费数据盘与最低总容量只能选择一种');
-  const gpuCount=integer(args.gpuCount,'GPU 数量',{min:1,max:1024}),minimum=args.minDataDiskGB===undefined?undefined:integer(args.minDataDiskGB,'最低数据盘总容量 GB',{min:1,max:1000000}),fixedDisk=minimum===undefined?integer(args.dataDiskGB??0,'额外付费数据盘 GB',{max:1000000}):undefined,name=instanceName(args.name),machine=await this.#machine(args.machineId);available(machine,gpuCount);
+  const gpuCount=integer(args.gpuCount,'GPU 数量',{min:1,max:1024}),minimumGpuMemory=args.minGpuMemoryGB===undefined?undefined:integer(args.minGpuMemoryGB,'每张 GPU 最低显存 GB',{min:1,max:10000}),minimum=args.minDataDiskGB===undefined?undefined:integer(args.minDataDiskGB,'最低数据盘总容量 GB',{min:1,max:1000000}),fixedDisk=minimum===undefined?integer(args.dataDiskGB??0,'额外付费数据盘 GB',{max:1000000}):undefined,name=instanceName(args.name),machine=await this.#machine(args.machineId);available(machine,gpuCount);
+  const gpuMemoryGB=Number.isSafeInteger(machine.gpu_memory)&&machine.gpu_memory>0?machine.gpu_memory/GB:undefined;
+  if(minimumGpuMemory!==undefined&&(gpuMemoryGB===undefined||gpuMemoryGB<minimumGpuMemory))throw fail('HOST_CONFIG_MISMATCH','所选主机每张 GPU 显存不足或无法核实显存容量');
   if(!Number.isSafeInteger(machine.max_instance_disk_size)||machine.max_instance_disk_size<0||!Number.isSafeInteger(machine.max_data_disk_expand_size)||machine.max_data_disk_expand_size<0)throw fail('SCHEMA_CHANGED','主机缺少可验证的免费数据盘容量或扩容上限');
   let dataDiskGB=minimum===undefined?fixedDisk:Math.max(0,Math.ceil(minimum-machine.max_instance_disk_size/GB)),expand=dataDiskGB*GB;
   if(expand>machine.max_data_disk_expand_size)throw fail('DATA_DISK_UNAVAILABLE','额外数据盘容量超过所选主机的扩容上限');
@@ -87,7 +89,7 @@ export class ProvisioningManager{
    image={...image,gpuSeries:gpu.gpu_series_type};
   }
   const price=await this.#api.request({path:'/api/v1/order/price/preview',method:'POST'},body.price_info),quote=quoteOrderPrice(price,{expandDataDiskBytes:expand,expandSystemDiskBytes:0});
-  const configuration={machineId:machine.machine_id,regionSign:machine.region_sign,gpuName:machine.gpu_name,gpuCount,chargeType:'payg',name:instance.instance_name,freeDataDiskGB:machine.max_instance_disk_size/GB,dataDiskGB,totalDataDiskGB:machine.max_instance_disk_size/GB+dataDiskGB,systemDiskGB:30,driverVersion:machine.driver_version,highestCudaVersion:machine.highest_cuda_version,image};
+  const configuration={machineId:machine.machine_id,regionSign:machine.region_sign,gpuName:machine.gpu_name,gpuCount,...(gpuMemoryGB===undefined?{}:{gpuMemoryGB}),chargeType:'payg',name:instance.instance_name,freeDataDiskGB:machine.max_instance_disk_size/GB,dataDiskGB,totalDataDiskGB:machine.max_instance_disk_size/GB+dataDiskGB,systemDiskGB:30,driverVersion:machine.driver_version,highestCudaVersion:machine.highest_cuda_version,image};
   return{mode,configuration,source,body,quote,warning:'提交后将创建新的按量计费实例并开始计费；扩容数据盘关机后仍按平台规则收费。'+(mode==='clone'?'源实例会保留；系统盘必选拷贝，数据盘仅在明确选择时拷贝。':''),fingerprint:JSON.stringify({machine:pick(machine,machineKeys.filter(k=>!['gpu_idle_num','binding_instance_num','machine_sku_info'].includes(k))),body,quote,image,sourceFingerprint})};
  }
  async prepare(mode,args={}){
@@ -100,7 +102,7 @@ export class ProvisioningManager{
   const current=await this.#build(plan.mode,plan.args);if(current.fingerprint!==plan.fingerprint)throw fail('PLAN_CHANGED','主机配置、镜像、源实例或完整报价已变化，请重新确认');
   if(plan.expiresAt<=Date.now())throw fail('PLAN_EXPIRED','新建或克隆确认在复查期间已过期，请重新预览');
   if(typeof beforeSubmit==='function')beforeSubmit();
-  let result;try{result=await this.#api.request({path:`/api/v1/order/instance/${plan.mode}/payg`,method:'POST'},plan.body);}catch(error){if(['NETWORK','SCHEMA_CHANGED'].includes(error.code)||error.code==='API_ERROR'&&error.retryable)throw fail('ACTION_UNCERTAIN','创建请求结果未知；请先查询实例列表，不要重复提交');throw error;}
+  let result;try{result=await this.#api.request({path:`/api/v1/order/instance/${plan.mode}/payg`,method:'POST'},plan.body);}catch(error){if(['NETWORK','SCHEMA_CHANGED'].includes(error.code)||error.code==='API_ERROR'&&error.retryable)throw Object.assign(fail('ACTION_UNCERTAIN','创建请求结果未知；请先查询实例列表，不要重复提交'),pick(error,['providerCode','operation','httpStatus']),{retryable:false});throw error;}
   const uuid=typeof result==='string'?result:result?.instance_uuid||result?.uuid;
   if(typeof uuid!=='string'||!uuid.trim())throw fail('ACTION_UNCERTAIN','AutoDL 已响应但缺少新实例 UUID，请先查询实例列表，不要重复提交');
   return{accepted:true,state:'submitted',mode:plan.mode,instanceUuid:uuid,configuration:plan.configuration,quote:plan.quote};
